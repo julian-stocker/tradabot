@@ -161,6 +161,13 @@ class Event:
     """Stable identity for deduplication, e.g. ``"NVDA:1d:5d"``. Two events with
     the same type and key describe the same subject, which is what lets a policy
     suppress a repeat without inspecting the payload."""
+    routing_key: str | None = None
+    """Which destination within a category, e.g. ``"paper-100"``.
+
+    Distinct from :attr:`key`: that identifies the *subject*, this identifies the
+    *destination*. It comes from persistent portfolio identity, never from
+    message content -- routing on what a message happens to say would break the
+    moment the wording changed."""
 
     @property
     def category(self) -> EventCategory:
@@ -270,21 +277,27 @@ class Event:
         )
 
     @staticmethod
-    def paper_trade_opened(*, symbol: str, payload: dict[str, Any]) -> Event:
+    def paper_trade_opened(
+        *, symbol: str, payload: dict[str, Any], routing_key: str | None = None
+    ) -> Event:
         return Event(
             type=EventType.PAPER_TRADE_OPENED,
             occurred_at=utc_now(),
             payload=payload,
-            key=f"trade-open:{symbol}",
+            key=f"trade-open:{routing_key or 'all'}:{symbol}",
+            routing_key=routing_key,
         )
 
     @staticmethod
-    def paper_trade_closed(*, symbol: str, payload: dict[str, Any]) -> Event:
+    def paper_trade_closed(
+        *, symbol: str, payload: dict[str, Any], routing_key: str | None = None
+    ) -> Event:
         return Event(
             type=EventType.PAPER_TRADE_CLOSED,
             occurred_at=utc_now(),
             payload=payload,
-            key=f"trade-close:{symbol}",
+            key=f"trade-close:{routing_key or 'all'}:{symbol}",
+            routing_key=routing_key,
         )
 
     @staticmethod

@@ -14,15 +14,19 @@ Nested settings use the ``__`` delimiter, e.g.::
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Sequence
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
+
+_PORTFOLIO_WEBHOOK_KEY = re.compile(r"paper_(?P<suffix>[a-z0-9_]+)_webhook")
 
 WEIGHT_SUM_TOLERANCE = 1e-6
 
@@ -113,6 +117,25 @@ class AlpacaSettings(BaseModel):
     backoff_max_seconds: float = Field(default=30.0, gt=0)
     max_bars_per_request: int = Field(default=10_000, ge=1, le=10_000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_alpaca_naming(cls, values: Any) -> Any:
+        """Accept ``SECRET_KEY`` as well as ``API_SECRET``.
+
+        Alpaca's own dashboard and documentation call the pair "API Key ID" and
+        "Secret Key", so ``TRADABOT_ALPACA__SECRET_KEY`` is what someone
+        following their instructions writes. Rejecting it produced the worst
+        possible symptom: the key was read, the secret silently was not, and
+        `is_configured` reported False with both variables visibly present in
+        `.env`.
+
+        ``api_secret`` stays canonical -- this only widens what is accepted.
+        """
+        if isinstance(values, dict) and "secret_key" in values:
+            alias = values.pop("secret_key")
+            values.setdefault("api_secret", alias)
+        return values
+
     @property
     def is_configured(self) -> bool:
         """Whether both credentials are present.
@@ -164,6 +187,85 @@ class MarketDataSettings(BaseModel):
         return value
 
 
+class ScannerSettings(BaseModel):
+    """Continuous scanner behaviour.
+
+    Intervals are **declared, not enforced**: nothing here sleeps or loops. They
+    document the cadence an external scheduler should invoke the CLI at, and are
+    read by `scanner status` so the configured intent and the actual behaviour
+    can be compared. Putting a scheduler inside the domain would make the cadence
+    untestable and the process unkillable mid-cycle.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = Field(default=True, description="Master switch for scan cycles.")
+
+    scan_interval_minutes: int = Field(
+        default=15, ge=1, description="Intended gap between full signal scans."
+    )
+    market_sync_interval_minutes: int = Field(
+        default=5, ge=1, description="Intended gap between incremental data syncs."
+    )
+    overview_interval_minutes: int = Field(
+        default=60, ge=1, description="Intended gap between market overviews."
+    )
+
+    top_candidates: int = Field(
+        default=5, ge=1, le=50, description="Candidates in an overview or ranking."
+    )
+
+    max_data_age_minutes: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Newest bar older than this makes an evaluation non-actionable. It is "
+            "still persisted -- with its data-quality state -- because a stale "
+            "observation is a real observation about the feed."
+        ),
+    )
+
+    signal_expiry_hours: int = Field(
+        default=48,
+        ge=1,
+        description=(
+            "An active signal not seen for this long EXPIRES. Deliberately "
+            "distinct from invalidation: 'we stopped looking' is not 'it stopped "
+            "being true', and conflating them would poison future labels."
+        ),
+    )
+
+    lease_seconds: int = Field(
+        default=900,
+        ge=30,
+        description=(
+            "How long a scan lease is held. Long enough for a slow cycle, short "
+            "enough that a killed process does not lock the scanner for an hour."
+        ),
+    )
+
+    require_regular_session: bool = Field(
+        default=True,
+        description=(
+            "Only qualify NEW signals during the regular session. The free IEX "
+            "feed's extended-hours spreads and volume read very differently, and "
+            "a scanner qualifying on them would be measuring the feed. "
+            "Evaluations are still recorded outside the session."
+        ),
+    )
+
+    max_symbols_per_cycle: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description=(
+            "Hard ceiling on one cycle. A guard rail, not a target -- the "
+            "multiple-comparisons hazard grows with universe size "
+            "(see app/scanner/models.py)."
+        ),
+    )
+
+
 class DiscordSettings(BaseModel):
     """Discord webhook delivery.
 
@@ -184,9 +286,26 @@ class DiscordSettings(BaseModel):
     )
 
     market_webhook: SecretStr = Field(default=SecretStr(""), description="#market-signals.")
-    trades_webhook: SecretStr = Field(default=SecretStr(""), description="#paper-trades.")
     performance_webhook: SecretStr = Field(default=SecretStr(""), description="#performance.")
     system_webhook: SecretStr = Field(default=SecretStr(""), description="#tradabot-system.")
+
+    trades_webhook: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Legacy single paper-trade channel. Used only as a fallback when a "
+            "portfolio has no destination of its own, so an existing setup keeps "
+            "working while portfolio channels are configured."
+        ),
+    )
+
+    portfolio_webhooks: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        description=(
+            "Routing key -> webhook, e.g. {'paper-100': ...}. Populated from any "
+            "TRADABOT_DISCORD__PAPER_<N>_WEBHOOK variable by a generic rule, so "
+            "adding a portfolio is one environment variable and no code change."
+        ),
+    )
 
     request_timeout_seconds: float = Field(default=10.0, gt=0)
     max_retries: int = Field(
@@ -200,10 +319,59 @@ class DiscordSettings(BaseModel):
 
     username: str = Field(default="tradabot", description="Display name on posted messages.")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _collect_portfolio_webhooks(cls, values: Any) -> Any:
+        """Fold ``PAPER_<N>_WEBHOOK`` variables into :attr:`portfolio_webhooks`.
+
+        Generic on purpose. The rule is "any key matching ``paper_<something>_
+        webhook`` becomes routing key ``paper-<something>``", so a fourth
+        portfolio is a new environment variable and nothing else. Naming the
+        three current portfolios as explicit fields would mean editing this class
+        -- and then the routing code, and then the tests -- every time one is
+        added, which is exactly the coupling Part B forbids.
+        """
+        if not isinstance(values, dict):
+            return values
+
+        collected: dict[str, Any] = dict(values.get("portfolio_webhooks") or {})
+        for key in list(values):
+            match = _PORTFOLIO_WEBHOOK_KEY.fullmatch(str(key).lower())
+            if match is None:
+                continue
+            routing_key = f"paper-{match.group('suffix').replace('_', '-')}"
+            collected.setdefault(routing_key, values.pop(key))
+
+        if collected:
+            values["portfolio_webhooks"] = collected
+        return values
+
+    def webhook_for_portfolio(self, routing_key: str) -> SecretStr | None:
+        """The destination for one portfolio, or the legacy channel, or None.
+
+        Falls back to ``trades_webhook`` so an installation that has not yet
+        configured per-portfolio channels keeps delivering rather than silently
+        going quiet.
+        """
+        secret = self.portfolio_webhooks.get(routing_key)
+        if secret is not None and secret.get_secret_value().strip():
+            return secret
+        legacy = self.trades_webhook.get_secret_value().strip()
+        return self.trades_webhook if legacy else None
+
+    @property
+    def configured_portfolios(self) -> frozenset[str]:
+        """Routing keys with a destination. Names only, never values."""
+        return frozenset(
+            key
+            for key, secret in self.portfolio_webhooks.items()
+            if secret.get_secret_value().strip()
+        )
+
     @property
     def configured_categories(self) -> frozenset[str]:
         """Categories with a webhook set. Never reveals the values."""
-        return frozenset(
+        named = frozenset(
             name
             for name, secret in (
                 ("market", self.market_webhook),
@@ -213,11 +381,21 @@ class DiscordSettings(BaseModel):
             )
             if secret.get_secret_value().strip()
         )
+        return named | self.configured_portfolios
 
     @property
     def is_configured(self) -> bool:
         """Whether at least one channel can be delivered to."""
         return bool(self.configured_categories)
+
+    def missing_portfolio_destinations(self, routing_keys: Sequence[str]) -> list[str]:
+        """Which of ``routing_keys`` have nowhere to go.
+
+        Used by the operations check. Reports **names**, never values -- an
+        operator needs to know which channel is unconfigured, not what the
+        configured ones point at.
+        """
+        return [key for key in routing_keys if self.webhook_for_portfolio(key) is None]
 
 
 class NotificationSettings(BaseModel):
@@ -417,6 +595,9 @@ class Settings(BaseSettings):
     # --- Notifications ----------------------------------------------------
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     discord: DiscordSettings = Field(default_factory=DiscordSettings)
+
+    # --- Scanner ----------------------------------------------------------
+    scanner: ScannerSettings = Field(default_factory=ScannerSettings)
 
     @field_validator("database_url")
     @classmethod

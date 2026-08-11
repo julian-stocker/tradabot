@@ -17,6 +17,14 @@ from app.market_data.provider import CandleData
 
 logger = get_logger(__name__)
 
+CANDLE_COLUMNS = 12
+SQLITE_MAX_VARIABLES = 32_000
+"""SQLite's compiled-in parameter ceiling is 32766 since 3.32 (999 before).
+Staying under the modern figure with a margin; the chunking costs one extra
+round trip per few thousand bars and removes an entire class of failure."""
+
+CANDLE_UPSERT_CHUNK = SQLITE_MAX_VARIABLES // CANDLE_COLUMNS
+
 _UPSERT_COLUMNS = (
     "open",
     "high",
@@ -160,14 +168,22 @@ class CandleRepository:
             }
             for candle in candles
         ]
-        stmt = build_upsert(
-            self._session,
-            table_of(Candle),
-            rows,
-            index_elements=["instrument_id", "timeframe", "timestamp"],
-            update_columns=_UPSERT_COLUMNS,
-        )
-        await self._session.execute(stmt)
+        # Chunked because SQLite caps the number of bound parameters in one
+        # statement. A single intraday backfill is tens of thousands of bars,
+        # which at twelve columns each blows past the limit and fails the whole
+        # insert -- so the batch size is derived from the column count rather
+        # than guessed, and PostgreSQL simply never notices the difference.
+        for start in range(0, len(rows), CANDLE_UPSERT_CHUNK):
+            chunk = rows[start : start + CANDLE_UPSERT_CHUNK]
+            stmt = build_upsert(
+                self._session,
+                table_of(Candle),
+                chunk,
+                index_elements=["instrument_id", "timeframe", "timestamp"],
+                update_columns=_UPSERT_COLUMNS,
+            )
+            await self._session.execute(stmt)
+
         logger.info(
             "upserted candles",
             instrument_id=instrument_id,

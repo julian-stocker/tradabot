@@ -150,6 +150,19 @@ class SimulationProfileConfig(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     enabled: bool = True
 
+    owner_id: int | None = Field(
+        default=None, description="Owning TradabotUser. None on a legacy profile."
+    )
+    notification_channel: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Notification routing key, e.g. 'paper-100'. Persistent portfolio "
+            "identity: notification routing looks this up rather than inspecting "
+            "message content. None means no portfolio-channel messages."
+        ),
+    )
+
     risk: RiskConfig
     costs: BrokerCostConfig
 

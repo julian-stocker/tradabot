@@ -35,6 +35,11 @@ TRADABOT_ALPACA__API_KEY=
 TRADABOT_ALPACA__API_SECRET=
 ```
 
+`TRADABOT_ALPACA__SECRET_KEY` is accepted as an alias for `API_SECRET`, because
+Alpaca's dashboard calls the pair "API Key ID" and "Secret Key" — and the
+mismatch fails in the worst way, with the key read, the secret silently ignored,
+and both variables plainly present in `.env`.
+
 Create them at <https://app.alpaca.markets>. **Paper-account keys are
 sufficient** — tradabot only reads market data, so a key with trading permission
 grants more access than the job needs.

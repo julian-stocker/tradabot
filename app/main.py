@@ -12,6 +12,7 @@ from app.api.router import api_router
 from app.api.routes.health import router as health_router
 from app.api.routes.market_data import router as market_data_health_router
 from app.api.routes.notifications import router as notifications_health_router
+from app.api.routes.scanner import router as scanner_router
 from app.core.config import Settings, get_settings
 from app.core.events import Event
 from app.core.logging import configure_logging, get_logger
@@ -105,6 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(market_data_health_router)
     app.include_router(notifications_health_router)
+    app.include_router(scanner_router, prefix=settings.api_prefix)
     app.include_router(api_router, prefix=settings.api_prefix)
     return app
 

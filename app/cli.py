@@ -11,11 +11,13 @@ import asyncio
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
-from app.core.events import Event, EventCategory
+from app.core.events import Event, EventCategory, EventType
 from app.core.logging import configure_logging
 from app.core.time import utc_now
 from app.corporate_actions.repository import CorporateActionRepository
@@ -26,18 +28,40 @@ from app.domain.enums import Horizon, Timeframe
 from app.features.service import FeatureService
 from app.instruments.repository import InstrumentRepository
 from app.instruments.service import InstrumentService
+from app.market_data.calendars import get_trading_calendar
 from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
 from app.notifications.repository import NotificationRepository
 from app.notifications.service import NotificationService
-from app.notifications.summary import build_daily_summary
+from app.notifications.summary import build_daily_summary, daily_summary_already_sent
+from app.ops.check import operational_status, run_checks
+from app.ops.launchd import (
+    LAUNCH_AGENTS_DIR,
+    ScheduledJob,
+    install_commands,
+    scheduled_jobs,
+    uninstall_commands,
+    write_plists,
+)
+from app.ownership.service import ensure_local_ownership
 from app.paper.demo import run_demo
 from app.paper.performance import PerformanceSummary
 from app.paper.replay import REPLAY_DISCLAIMER, ReplayError, replay_symbol
+from app.scanner.demo import DemoResult, phase_boundaries, seed_demo_instrument
+from app.scanner.repository import (
+    ScanRunRepository,
+    SignalEvaluationRepository,
+    TrackedSignalRepository,
+    WatchlistRepository,
+)
+from app.scanner.seed import seed_watchlist
+from app.scanner.service import ScanCycleStats, ScannerService
+from app.scanner.sessions import describe_phase, session_phase
 from app.signals.service import SignalService
 from app.simulation.defaults import build_default_profiles
+from app.simulation.portfolios import PORTFOLIO_KEYS, build_personal_profiles
 from app.simulation.repository import SimulationProfileRepository
 
 
@@ -339,6 +363,480 @@ def _format_summary(summary: PerformanceSummary) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Portfolios and operations
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOG_DIR = PROJECT_ROOT / "logs"
+
+
+async def _portfolios_seed(settings: Settings) -> int:
+    """Install the three personal paper portfolios and the local owner."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            repository = SimulationProfileRepository(session)
+            await repository.upsert_many(build_default_profiles())
+            personal = build_personal_profiles()
+            await repository.upsert_many(personal)
+            await session.flush()
+            report = await ensure_local_ownership(session, settings)
+
+        print(f"\n{report.summary()}")
+        print("-" * 74)
+        for profile in personal:
+            print(
+                f"  {profile.name:<12} {profile.initial_capital:>8.0f} {profile.currency}  "
+                f"risk={profile.risk.name:<9} channel={profile.notification_channel}"
+            )
+        print("-" * 74)
+        print("Experimental simulation configurations, NOT financial recommendations.")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _portfolios_list(settings: Settings) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            status = await operational_status(session, settings)
+        if not status.portfolios:
+            print("\nNo personal portfolios. Run: tradabot portfolios seed")
+            return 1
+        print(f"\n{'PORTFOLIO':<14}{'EQUITY':>12}{'OPEN':>7}{'CLOSED':>8}")
+        print("-" * 42)
+        for portfolio in status.portfolios:
+            print(
+                f"{portfolio.key:<14}{portfolio.equity:>12.2f}"
+                f"{portfolio.open_positions:>7}{portfolio.closed_trades:>8}"
+            )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _ops_check(settings: Settings) -> int:
+    """Validate that this installation can run unattended."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            report = await run_checks(session, settings, project_root=PROJECT_ROOT, log_dir=LOG_DIR)
+        print("\ntradabot operations check")
+        print("=" * 74)
+        print(report.render())
+        if not report.ok:
+            print("\nFix the FAIL items before installing the scheduler.")
+        return 0 if report.ok else 1
+    finally:
+        await engine.dispose()
+
+
+async def _ops_status(settings: Settings) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            status = await operational_status(session, settings)
+
+        def when(moment: object) -> str:
+            return moment.isoformat() if isinstance(moment, datetime) else "(never)"
+
+        print(f"\nchecked at        : {status.checked_at.isoformat()}")
+        print(f"session           : {status.session_phase}")
+        print(f"last market sync  : {when(status.last_sync)}")
+        print(f"last scan         : {when(status.last_scan)}  ({status.last_scan_status or '-'})")
+        print(f"last scan success : {when(status.last_success)}")
+        print(f"last error        : {status.last_error or '-'}")
+        print(f"notify last ok    : {when(status.last_notification_success)}")
+        print(f"notify last fail  : {when(status.last_notification_failure)}")
+        print()
+        print(f"{'PORTFOLIO':<14}{'EQUITY':>12}{'OPEN':>7}{'CLOSED':>8}")
+        for portfolio in status.portfolios:
+            print(
+                f"{portfolio.key:<14}{portfolio.equity:>12.2f}"
+                f"{portfolio.open_positions:>7}{portfolio.closed_trades:>8}"
+            )
+        if not status.portfolios:
+            print("(no personal portfolios; run `tradabot portfolios seed`)")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+def _ops_jobs(settings: Settings) -> tuple[ScheduledJob, ...]:
+    return scheduled_jobs(
+        scan_minutes=settings.scanner.scan_interval_minutes,
+        sync_minutes=settings.scanner.market_sync_interval_minutes,
+        overview_minutes=settings.scanner.overview_interval_minutes,
+    )
+
+
+def _ops_install(settings: Settings) -> int:
+    """Write launchd plists and print the commands to activate them.
+
+    Writes files; **loads nothing**. Starting a schedule on someone's machine
+    should be a deliberate keystroke, not a side effect of a build step.
+    """
+    jobs = _ops_jobs(settings)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    written = write_plists(
+        jobs,
+        project_root=PROJECT_ROOT,
+        python_path=Path(sys.executable),
+        log_dir=LOG_DIR,
+        target_dir=LAUNCH_AGENTS_DIR,
+    )
+    print(f"\nwrote {len(written)} LaunchAgent templates to {LAUNCH_AGENTS_DIR}")
+    for job in jobs:
+        print(f"  {job.label:<28} every {job.interval_seconds // 60:>3} min  {job.description}")
+    print("\nNothing is running yet. To activate:")
+    for command in install_commands(jobs, target_dir=LAUNCH_AGENTS_DIR):
+        print(f"  {command}")
+    print("\nOr: make ops-start")
+    return 0
+
+
+def _ops_uninstall(settings: Settings) -> int:
+    jobs = _ops_jobs(settings)
+    print("\nTo stop and remove the scheduled jobs:")
+    for command in uninstall_commands(jobs, target_dir=LAUNCH_AGENTS_DIR):
+        print(f"  {command}")
+    for job in jobs:
+        print(f"  rm -f {LAUNCH_AGENTS_DIR / job.plist_name}")
+    print("\nNothing was removed automatically; uninstalling is your keystroke too.")
+    return 0
+
+
+async def _ops_daily_summary_if_due(settings: Settings) -> int:
+    """Send the daily report once, after the session has closed.
+
+    Session-aware rather than pinned to a wall-clock hour: a fixed local time
+    bakes in a timezone and slips by an hour twice a year with US daylight
+    saving, which shows up as a missing report rather than an error.
+
+    Idempotent for the day -- a scheduler firing hourly must not produce hourly
+    reports.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            status = await operational_status(session, settings)
+            if not status.session_closed:
+                print("\nsession has not closed yet; no report sent")
+                return 0
+            if await daily_summary_already_sent(session, settings):
+                print("\ndaily report already sent for this session")
+                return 0
+            payload = await build_daily_summary(session)
+
+        service = NotificationService(settings, session_factory=factory)
+        await service.publish(Event.daily_summary(payload))
+        print(f"\ndaily report sent ({len(payload.get('portfolios', []))} portfolios)")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Watchlist and scanner
+# ---------------------------------------------------------------------------
+async def _watchlist_list(settings: Settings) -> int:
+    """Print the watchlist, enabled and disabled."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            entries = await WatchlistRepository(session).list_entries(enabled_only=False)
+
+        if not entries:
+            print("\nWatchlist is empty. Seed it with: tradabot watchlist seed")
+            return 0
+
+        print(f"\n{len(entries)} entries")
+        print("-" * 62)
+        for entry, instrument in entries:
+            mark = "on " if entry.enabled else "off"
+            tags = ",".join(entry.tags) if entry.tags else "-"
+            print(f"  [{mark}] {instrument.symbol:<8} prio={entry.priority:<3} {tags}")
+        enabled = sum(1 for e, _ in entries if e.enabled)
+        print("-" * 62)
+        print(f"enabled: {enabled}   disabled: {len(entries) - enabled}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _watchlist_seed(settings: Settings) -> int:
+    """Seed the initial development universe."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    provider = build_provider(settings)
+    try:
+        async with session_scope(factory) as session:
+            report = await seed_watchlist(session, provider)
+
+        print(f"\nprovider: {provider.name}")
+        print(report.summary())
+        if report.missing:
+            print("\nThese are not in the provider's universe.")
+            if provider.name == "alpaca":
+                print("Add them to TRADABOT_MARKET_DATA__WATCHLIST, then re-run.")
+            else:
+                print(f"The {provider.name} provider serves a fixed set of symbols.")
+        print("\nInstrument inclusion is NOT an investment recommendation.")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _watchlist_add(settings: Settings, symbol: str) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    provider = build_provider(settings)
+    try:
+        async with session_scope(factory) as session:
+            instruments = InstrumentRepository(session)
+            instrument = await instruments.get_by_symbol(symbol)
+            if instrument is None:
+                infos = [i for i in await provider.get_instruments() if i.symbol.upper() == symbol]
+                if not infos:
+                    print(f"\n{symbol} is not available from provider '{provider.name}'.")
+                    return 1
+                await instruments.upsert_many(infos, provider=provider.name)
+                await session.flush()
+                instrument = await instruments.get_by_symbol(symbol)
+            assert instrument is not None
+            await WatchlistRepository(session).add(instrument.id)
+        print(f"\n{symbol} added to the watchlist.")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _watchlist_set_enabled(settings: Settings, symbol: str, *, enabled: bool) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            found = await WatchlistRepository(session).set_enabled(symbol, enabled=enabled)
+        if not found:
+            print(f"\n{symbol} is not on the watchlist.")
+            return 1
+        print(f"\n{symbol} {'enabled' if enabled else 'disabled'}.")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+def _build_scanner(settings: Settings, factory: object) -> ScannerService:
+    return ScannerService(
+        factory,  # type: ignore[arg-type]
+        settings=settings,
+        provider=build_provider(settings),
+        notifications=NotificationService(settings, session_factory=factory),  # type: ignore[arg-type]
+    )
+
+
+def _print_stats(stats: ScanCycleStats) -> None:
+    print(f"\nsession    : {stats.session_phase.value}")
+    if stats.skipped_reason:
+        print(f"skipped    : {stats.skipped_reason}")
+    print(
+        f"symbols    : {stats.symbols_total} total, {stats.symbols_evaluated} evaluated, "
+        f"{stats.symbols_failed} failed"
+    )
+    print(f"qualified  : {stats.signals_qualified}   strong: {stats.signals_strong}")
+    print(f"hit rate   : {stats.hit_rate:.1%}   <- the base rate; high means unselective")
+    print(f"paper      : {stats.paper_decisions} decisions, {stats.positions_opened} opened")
+    print(f"duration   : {stats.duration_seconds:.1f}s")
+    for symbol, error in stats.failures[:5]:
+        print(f"  FAILED {symbol}: {error}")
+
+
+async def _scanner_sync(settings: Settings) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        stats = await _build_scanner(settings, factory).sync_market_data()
+        print(
+            f"\nsynced {stats.symbols_synced}/{stats.symbols_total} symbols "
+            f"in {stats.duration_seconds:.1f}s"
+        )
+        for symbol, error in stats.failures[:5]:
+            print(f"  FAILED {symbol}: {error}")
+        return 0 if stats.symbols_failed == 0 else 1
+    finally:
+        await engine.dispose()
+
+
+async def _scanner_run_once(settings: Settings, *, paper: bool) -> int:
+    """One scan cycle against the configured provider."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        stats = await _build_scanner(settings, factory).run_scan_cycle(with_paper_trading=paper)
+        _print_stats(stats)
+        print(
+            "\nZero qualified signals is a valid result. Thresholds control "
+            "notification volume,\nnot data collection -- every evaluation was stored."
+        )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _scanner_candidates(settings: Settings, limit: int) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        candidates = await _build_scanner(settings, factory).top_candidates(limit)
+        if not candidates:
+            print("\nNo candidates currently meet the configured threshold.")
+            return 0
+        print(f"\n{len(candidates)} candidates")
+        print("-" * 78)
+        for index, candidate in enumerate(candidates, start=1):
+            print(f"  {index}. {candidate.explain()}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _scanner_overview(settings: Settings) -> int:
+    """Send the ranked overview to the market channel."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        scanner = _build_scanner(settings, factory)
+        candidates = await scanner.top_candidates()
+        service = NotificationService(settings, session_factory=factory)
+        await service.publish(
+            Event(
+                type=EventType.MARKET_OVERVIEW,
+                occurred_at=utc_now(),
+                payload={
+                    "candidates": [
+                        {
+                            "symbol": c.symbol,
+                            "score": c.score,
+                            "direction": "bullish" if c.direction > 0 else "bearish",
+                            "horizon": c.horizon,
+                            "confidence": c.confidence,
+                        }
+                        for c in candidates
+                    ]
+                },
+            )
+        )
+        print(f"\noverview sent with {len(candidates)} candidates")
+        if not candidates:
+            print("(reported honestly as 'no qualified opportunities')")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _scanner_demo(settings: Settings) -> int:
+    """Deterministic end-to-end scanner demonstration.
+
+    Mock data, console notifier, constructed prices. No Discord, no Alpaca, no
+    network. Scans at each phase boundary so the lifecycle progression is
+    reproducible rather than dependent on where a scan happens to land.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    demo_settings = settings.model_copy(
+        update={"notifications": settings.notifications.model_copy(update={"console": True})}
+    )
+    try:
+        now = utc_now()
+        async with session_scope(factory) as session:
+            await SimulationProfileRepository(session).upsert_many(build_default_profiles())
+
+        scanner = ScannerService(
+            factory,
+            settings=demo_settings,
+            provider=build_provider(demo_settings),
+            notifications=NotificationService(demo_settings, session_factory=factory),
+        )
+
+        print("\ntradabot scanner demo (deterministic, constructed prices)")
+        print("=" * 78)
+        result = DemoResult()
+
+        for name, index, note in phase_boundaries():
+            # Reveal more of the price path, then scan at the same instant. See
+            # seed_demo_instrument for why the data advances and the clock does not.
+            async with session_scope(factory) as session:
+                await seed_demo_instrument(session, now=now, bars=index)
+            stats = await scanner.run_scan_cycle(as_of=now, with_paper_trading=True)
+            result.cycles += 1
+            result.evaluations += stats.symbols_evaluated
+            result.paper_decisions += stats.paper_decisions
+            result.positions_opened += stats.positions_opened
+
+            async with session_scope(factory) as session:
+                signals = await TrackedSignalRepository(session).active_signals()
+                states = [(s.lifecycle, s.current_score) for s in signals]
+            state = states[0] if states else ("(none)", 0.0)
+            result.transitions.append((name, state[0], state[1]))
+            print(f"  {name:<14} score={state[1]:>6.1f}  lifecycle={state[0]:<12} {note}")
+
+        print("-" * 78)
+        print(result.describe())
+        print("-" * 78)
+        print(
+            "Constructed prices exercise the scan, lifecycle and paper machinery.\n"
+            "They are not a market and say nothing about profitability or edge."
+        )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _scanner_status(settings: Settings) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            watchlist = await WatchlistRepository(session).count()
+            runs = ScanRunRepository(session)
+            latest = await runs.latest()
+            success = await runs.latest_successful()
+            signals = TrackedSignalRepository(session)
+            qualified = await signals.qualified_signals()
+            evaluations = await SignalEvaluationRepository(session).count()
+
+        calendar = get_trading_calendar(settings.market_data.default_exchange)
+        now = utc_now()
+        print(f"\nenabled          : {settings.scanner.enabled}")
+        print(f"watchlist        : {watchlist} enabled")
+        print(f"session          : {describe_phase(session_phase(calendar, now), now)}")
+        print(
+            f"scan interval    : {settings.scanner.scan_interval_minutes} min (external scheduler)"
+        )
+        print(f"last scan        : {latest.started_at.isoformat() if latest else '(never)'}")
+        print(f"last status      : {latest.status if latest else '-'}")
+        duration = (
+            f"{latest.duration_seconds:.1f}s"
+            if latest and latest.duration_seconds is not None
+            else "-"
+        )
+        print(f"last duration    : {duration}")
+        print(f"last success     : {success.started_at.isoformat() if success else '(never)'}")
+        print(f"last error       : {latest.error if latest and latest.error else '-'}")
+        print(f"qualified signals: {len(qualified)}")
+        print(f"evaluations kept : {evaluations}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 async def _notifications_test(settings: Settings, category: str | None) -> int:
@@ -359,9 +857,12 @@ async def _notifications_test(settings: Settings, category: str | None) -> int:
             return 1
 
         target = EventCategory(category) if category else None
+        # Portfolio channels are tested alongside the category channels, so a
+        # single command proves all six destinations route correctly.
+        keys = () if category else PORTFOLIO_KEYS
         print(f"\nbackends: {', '.join(service.backend_names)}")
         print(f"channels: {', '.join(sorted(settings.discord.configured_categories)) or '(none)'}")
-        sent = await service.send_test(target)
+        sent = await service.send_test(target, routing_keys=keys)
         print(f"sent test messages to: {', '.join(sent)}")
         if service.last_error:
             print(f"last error: {service.last_error}")
@@ -483,6 +984,68 @@ def _run_market_data(settings: Settings, args: argparse.Namespace) -> int:
     return asyncio.run(_market_data_quote(settings, args.symbol.upper()))
 
 
+def _run_portfolios(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``portfolios`` subcommand."""
+    if args.portfolios_command == "seed":
+        return asyncio.run(_portfolios_seed(settings))
+    return asyncio.run(_portfolios_list(settings))
+
+
+def _run_ops(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch an ``ops`` subcommand.
+
+    ``install`` and ``uninstall`` are synchronous and touch only the filesystem;
+    neither runs ``launchctl``.
+    """
+    command = args.ops_command
+    if command == "install":
+        return _ops_install(settings)
+    if command == "uninstall":
+        return _ops_uninstall(settings)
+
+    coroutines: dict[str, Callable[[Settings], Any]] = {
+        "check": _ops_check,
+        "status": _ops_status,
+        "daily-summary-if-due": _ops_daily_summary_if_due,
+    }
+    return int(asyncio.run(coroutines[command](settings)))
+
+
+def _run_watchlist(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``watchlist`` subcommand."""
+    command = args.watchlist_command
+    if command == "list":
+        return asyncio.run(_watchlist_list(settings))
+    if command == "seed":
+        return asyncio.run(_watchlist_seed(settings))
+    symbol = args.symbol.upper()
+    if command == "add":
+        return asyncio.run(_watchlist_add(settings, symbol))
+    return asyncio.run(_watchlist_set_enabled(settings, symbol, enabled=command == "enable"))
+
+
+def _run_scanner(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``scanner`` subcommand.
+
+    A table rather than a chain: the two commands taking arguments are handled
+    first, and the rest are a lookup.
+    """
+    command = args.scanner_command
+    if command == "run-once":
+        return asyncio.run(_scanner_run_once(settings, paper=not args.no_paper))
+    if command == "candidates":
+        return asyncio.run(_scanner_candidates(settings, args.limit))
+
+    simple: dict[str, Callable[[Settings], Any]] = {
+        "sync": _scanner_sync,
+        "overview": _scanner_overview,
+        "daily-summary": _notifications_daily_summary,
+        "demo": _scanner_demo,
+        "status": _scanner_status,
+    }
+    return int(asyncio.run(simple[command](settings)))
+
+
 def _run_notifications(settings: Settings, args: argparse.Namespace) -> int:
     """Dispatch a ``notifications`` subcommand."""
     command = args.notification_command
@@ -515,11 +1078,69 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     ),
     "market-data": _run_market_data,
     "notifications": _run_notifications,
+    "watchlist": _run_watchlist,
+    "scanner": _run_scanner,
+    "portfolios": _run_portfolios,
+    "ops": _run_ops,
 }
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point."""
+def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Portfolio and operations commands."""
+    portfolios = sub.add_parser("portfolios", help="Personal paper portfolios")
+    portfolios_sub = portfolios.add_subparsers(dest="portfolios_command", required=True)
+    portfolios_sub.add_parser("seed", help="Install the three personal portfolios")
+    portfolios_sub.add_parser("list", help="Show portfolio equity and positions")
+
+    ops = sub.add_parser("ops", help="Local operations and scheduling")
+    ops_sub = ops.add_subparsers(dest="ops_command", required=True)
+    ops_sub.add_parser("check", help="Validate this installation can run unattended")
+    ops_sub.add_parser("status", help="What has run, and where the portfolios stand")
+    ops_sub.add_parser("install", help="Write launchd templates (starts nothing)")
+    ops_sub.add_parser("uninstall", help="Print the commands to remove them")
+    ops_sub.add_parser(
+        "daily-summary-if-due", help="Send the daily report once, after the session closes"
+    )
+
+
+def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Watchlist and scanner commands.
+
+    Grouped into their own builder because they are the largest command
+    family and their declaration would otherwise dominate the parser.
+    """
+    watchlist = sub.add_parser("watchlist", help="Manage the scanner watchlist")
+    watchlist_sub = watchlist.add_subparsers(dest="watchlist_command", required=True)
+    watchlist_sub.add_parser("list", help="Show the watchlist")
+    watchlist_sub.add_parser("seed", help="Seed the initial development universe")
+    for name, helptext in (
+        ("add", "Add a symbol"),
+        ("enable", "Enable a symbol"),
+        ("disable", "Disable a symbol"),
+    ):
+        parser_ = watchlist_sub.add_parser(name, help=helptext)
+        parser_.add_argument("symbol")
+
+    scanner = sub.add_parser("scanner", help="Continuous market scanner")
+    scanner_sub = scanner.add_subparsers(dest="scanner_command", required=True)
+    scanner_sub.add_parser("sync", help="Incrementally sync watchlist market data")
+    runner = scanner_sub.add_parser("run-once", help="Run one scan cycle")
+    runner.add_argument("--no-paper", action="store_true", help="Skip paper-trading decisions")
+    candidates = scanner_sub.add_parser("candidates", help="Show ranked current candidates")
+    candidates.add_argument("--limit", type=int, default=5)
+    scanner_sub.add_parser("overview", help="Send the ranked market overview")
+    scanner_sub.add_parser("status", help="Scanner configuration and last-run state")
+    scanner_sub.add_parser("demo", help="Deterministic end-to-end demonstration")
+    scanner_sub.add_parser("daily-summary", help="Send the daily report (alias)")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Every command and its arguments.
+
+    Separate from `main` so dispatch stays readable: the parser is
+    declaration, `main` is behaviour, and mixing them made the entry point
+    mostly setup.
+    """
     parser = argparse.ArgumentParser(prog="tradabot", description="tradabot developer CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -544,6 +1165,9 @@ def main(argv: list[str] | None = None) -> int:
         "--timeframe", default=Timeframe.D1.value, choices=[t.value for t in Timeframe]
     )
     simulate.add_argument("--horizon", default=Horizon.D5.value, choices=[h.value for h in Horizon])
+
+    _add_scanner_parsers(sub)
+    _add_ops_parsers(sub)
 
     notify = sub.add_parser("notifications", help="Notification delivery")
     notify_sub = notify.add_subparsers(dest="notification_command", required=True)
@@ -575,6 +1199,12 @@ def main(argv: list[str] | None = None) -> int:
     quoter.add_argument("symbol")
     sub.add_parser("create-tables", help="Create tables from metadata (SQLite dev only)")
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    parser = _build_parser()
     args = parser.parse_args(argv)
     settings = get_settings()
     configure_logging(level=settings.log_level, fmt=settings.log_format)

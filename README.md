@@ -145,6 +145,16 @@ make dev              # start the API with autoreload
 | `make notify-test` | Send a labelled TEST notification to every configured channel |
 | `make notify-status` | Notification configuration and delivery outcomes |
 | `make daily-summary` | Build and send the daily portfolio report |
+| `make watchlist-seed` | Seed the initial 52-symbol development universe |
+| `make scan` | Run one scan cycle |
+| `make scan-sync` | Incrementally sync watchlist market data |
+| `make candidates` | Show ranked current candidates |
+| `make demo-scanner` | Deterministic offline scanner demonstration |
+| `make portfolios-seed` | Install the 3 personal paper portfolios + local owner |
+| `make portfolios` | Portfolio equity and open positions |
+| `make ops-check` | Validate this installation can run unattended |
+| `make ops-install` / `ops-start` | Write launchd templates / start the schedule |
+| `make ops-status` / `ops-stop` / `ops-uninstall` | Inspect / stop / remove |
 | `make up` / `make down` | Start / stop the Docker stack |
 | `make clean` | Remove caches and build artefacts |
 
@@ -217,6 +227,11 @@ All under the `/api/v1` prefix. Interactive docs at `/docs`, schema at
 | `GET` | `/health` | Liveness + database connectivity |
 | `GET` | `/health/market-data` | Provider configuration and data freshness (credential-free) |
 | `GET` | `/health/notifications` | Notification delivery status (never exposes a webhook) |
+| `GET` | `/api/v1/scanner/status` | Scanner configuration, session phase and last run |
+| `GET` | `/api/v1/scanner/candidates` | Ranked current candidates |
+| `GET` | `/api/v1/signals/active` | Active tracked signals |
+| `GET` | `/api/v1/signals/{id}` | One tracked signal |
+| `GET` | `/api/v1/signals/{id}/evaluations` | A signal's evaluation history |
 | `GET` | `/api/v1/instruments` | List instruments (filter by exchange, asset type) |
 | `GET` | `/api/v1/instruments/{symbol}` | Instrument detail |
 | `GET` | `/api/v1/instruments/{symbol}/candles` | OHLCV in a time window |
@@ -270,13 +285,18 @@ These are known and deliberate, not oversights:
 10. **Historical spreads are assumed, not measured.** Bars carry no quote, so a
     replay applies the configured spread symmetrically. A real spread widens
     exactly when it matters most, and this one does not.
-11. **Notification delivery is at-most-once.** A failed alert is recorded but not
+11. **The baseline engine rarely reaches the 75 threshold.** With flat volume,
+    momentum and trend saturate near 97-99 and the score still tops out around
+    63 — half the weight sits in volume, volatility, regime and spread. Reaching
+    75 needs a volume step change as well as a trend, so expect few qualifying
+    signals. See [docs/signal-lifecycle.md](docs/signal-lifecycle.md#thresholds).
+12. **Notification delivery is at-most-once.** A failed alert is recorded but not
     automatically resent; a failed *signal* alert is retried by the next
     evaluation, a failed system alert is not. No transactional outbox — see
     [docs/notifications.md](docs/notifications.md).
-12. **Lifecycle, not index membership.** The universe answers "was this listed?",
+13. **Lifecycle, not index membership.** The universe answers "was this listed?",
     not "was this in the DAX in 2019?".
-13. **No backtester.** The paper engine runs forward through bars; it is not a
+14. **No backtester.** The paper engine runs forward through bars; it is not a
     historical strategy evaluator with walk-forward validation.
 
 ---
@@ -289,8 +309,9 @@ These are known and deliberate, not oversights:
 | 2 | Data integrity + simulation domain | ✅ complete |
 | 3 | Multi-profile paper-trading engine | ✅ complete |
 | 3b | Real market-data provider integration | ✅ complete |
-| 3.5 | Discord notification infrastructure | ✅ this release |
-| 4 | Market scanner | planned |
+| 3.5 | Discord notification infrastructure | ✅ complete |
+| 4 | Continuous scanner + signal lifecycle | ✅ complete |
+| 4.1 | Local operations + portfolio-aware Discord | ✅ this release |
 | 5 | Backtesting engine | planned |
 | 6 | Spread and execution-cost calibration | planned |
 | 7 | Machine-learning baseline | planned |
@@ -310,6 +331,13 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 - [docs/data-quality.md](docs/data-quality.md) — validation rules, gaps, and why nothing is repaired
 - [docs/notifications.md](docs/notifications.md) — event routing, thresholds, and database-vs-Discord
 - [docs/discord.md](docs/discord.md) — channels, webhook security, retries, message limits
+- [docs/scanner.md](docs/scanner.md) — the continuous scanner, universe, timeframes, locking
+- [docs/signal-lifecycle.md](docs/signal-lifecycle.md) — signal identity and state transitions
+- [docs/ml-dataset.md](docs/ml-dataset.md) — what is collected for a future model, and why
+- [docs/operations.md](docs/operations.md) — running continuously, scheduling, troubleshooting
+- [docs/macos-launchd.md](docs/macos-launchd.md) — launchd setup, sleep/wake, logs
+- [docs/multi-user-roadmap.md](docs/multi-user-roadmap.md) — the ownership boundary, and what is *not* built
+- [docs/provider-connections.md](docs/provider-connections.md) — credentials, references, future OAuth
 - [docs/data-adjustments.md](docs/data-adjustments.md) — corporate actions, raw vs adjusted prices
 - [docs/simulation-design.md](docs/simulation-design.md) — multi-profile simulation and feedback
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps

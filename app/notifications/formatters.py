@@ -70,6 +70,7 @@ def format_event(event: Event) -> NotificationMessage:
         event_type=event.type,
         occurred_at=event.occurred_at,
         key=event.key,
+        routing_key=event.routing_key,
         fields={k: _scalar(v) for k, v in payload.items() if not isinstance(v, list | dict)},
     )
 
@@ -262,8 +263,10 @@ def _format_summary(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]
     activity = [
         (label, payload.get(key))
         for label, key in (
+            ("Symbols scanned", "symbols_scanned"),
             ("Signals evaluated", "signals_evaluated"),
             ("Qualified signals", "signals_qualified"),
+            ("Currently qualified", "currently_qualified"),
             ("Paper entries", "entries"),
             ("Paper exits", "exits"),
         )

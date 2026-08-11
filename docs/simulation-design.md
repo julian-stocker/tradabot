@@ -271,3 +271,39 @@ state makes checkable.
   something you hold
 - Shorts, limit orders, partial fills, liquidity impact — each refused explicitly
   rather than approximated
+
+
+---
+
+## Personal portfolios (phase 4.1)
+
+Three named portfolios sit alongside the nine generic profiles, each with its own
+Discord channel:
+
+| Key | Capital | Risk | Channel |
+|---|---|---|---|
+| `paper-100` | 100 EUR | balanced | #paper-100 |
+| `paper-1000` | 1000 EUR | balanced | #paper-1000 |
+| `paper-10000` | 10000 EUR | balanced | #paper-10000 |
+
+> Experimental simulation configurations, **not financial recommendations**.
+
+All three share the *same* risk profile, so **capital is the only variable**.
+With three risk profiles as well, a difference in outcome could not be attributed
+to account size — and account size is the thing being studied. A fixed per-order
+fee is a large fraction of a 100 EUR round trip and negligible on a 10,000 EUR
+one, which is why the same signal produces different decisions. A test asserts
+that paper-100 declines a trade paper-10000 takes; if all three ever agreed on
+everything, two of them would be redundant.
+
+**Complete isolation.** Cash, equity, positions, realised and unrealised P&L,
+fees, spread costs, slippage, exposure, drawdown, decisions, orders and outcomes
+are per portfolio. A loss in one cannot reach another, and this is asserted by
+trading in one and checking the others rather than by inspection.
+
+The nine generic profiles are **unchanged**. They have no notification channel
+and produce no portfolio messages. These three are instances of that
+architecture, not a replacement for it.
+
+Each portfolio belongs to a `TradabotUser` — one local owner today. See
+[multi-user-roadmap.md](multi-user-roadmap.md).

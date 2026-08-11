@@ -247,6 +247,26 @@ class SimulationProfile(Base, TimestampMixin):
         ForeignKey("broker_cost_profiles.id", ondelete="RESTRICT"), nullable=False
     )
 
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tradabot_users.id", ondelete="SET NULL"),
+        nullable=True,
+        doc=(
+            "Who this portfolio belongs to. Nullable so existing rows are "
+            "untouched; a local installation has one owner. See "
+            "app/db/models/ownership.py."
+        ),
+    )
+    notification_channel: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc=(
+            "Notification routing key, e.g. 'paper-100'. **Persistent portfolio "
+            "identity**, which is what routing keys off -- deciding a destination "
+            "from message content would break the moment the wording changed. "
+            "Null means this portfolio produces no portfolio-channel messages."
+        ),
+    )
+
     enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

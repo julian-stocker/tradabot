@@ -6,7 +6,7 @@ no sleeps. A test that fails intermittently teaches you nothing.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -21,6 +21,26 @@ from app.domain.enums import Timeframe
 from app.main import create_app
 from app.market_data.provider import CandleData
 from app.market_data.providers.mock import MockMarketDataProvider
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_from_local_env() -> Iterator[None]:
+    """Stop the developer's `.env` from reaching the test suite.
+
+    `Settings` loads `.env` on instantiation, so a locally configured Discord
+    webhook or Alpaca key silently changed what the tests saw -- and did: two
+    backend tests started failing the moment real webhooks were configured, on a
+    machine where nothing about the code had changed.
+
+    A test suite whose result depends on untracked local configuration is not
+    measuring the code. Clearing the file reference for the session makes every
+    `Settings()` in the tests read defaults plus whatever the test itself sets.
+    """
+    original = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    yield
+    Settings.model_config["env_file"] = original
+
 
 TEST_SEED = 1337
 FIXED_NOW = datetime(2024, 6, 3, 12, 0, tzinfo=UTC)

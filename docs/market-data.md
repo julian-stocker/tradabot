@@ -182,6 +182,16 @@ secret could be reconstructed or confirmed. The live probe is opt-in
 (`?probe=true`) because a health check that always hits a rate-limited API is a
 reliable way to exhaust your own quota during an incident.
 
+## Backfill windows
+
+Sized per timeframe rather than per calendar span: 20 days of 5-minute bars, 45
+of 15-minute, 180 of hourly, 400 of daily. Warming up a 50-period EMA needs about
+sixty bars either way, and pulling 400 days of 5-minute data is 30,000 rows to
+compute an identical answer.
+
+Candle upserts are chunked to stay below SQLite's bound-parameter ceiling; a
+single intraday backfill otherwise exceeds it and the whole insert fails.
+
 ## Scheduling
 
 `MarketDataImportService.sync_watchlist` is a plain awaitable with no scheduler

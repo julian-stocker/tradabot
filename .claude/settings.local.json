@@ -104,7 +104,27 @@
       "Bash(grep -cE \"^TRADABOT_DISCORD__\\(MARKET|TRADES|PERFORMANCE|SYSTEM\\)_WEBHOOK=$\" .env.example)",
       "Bash(xargs -I{} echo \"empty webhook placeholders: {} \\(expected 4\\)\")",
       "Bash(.venv/bin/pytest -q -p no:cacheprovider)",
-      "Bash(export TRADABOT_DATABASE_URL=\"sqlite+aiosqlite:////private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/704669f9-d39e-4e60-bd47-8635f8ba8a8d/scratchpad/final6.db\")"
+      "Bash(export TRADABOT_DATABASE_URL=\"sqlite+aiosqlite:////private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/704669f9-d39e-4e60-bd47-8635f8ba8a8d/scratchpad/final6.db\")",
+      "Bash(command -v docker)",
+      "Bash(command -v docker-compose)",
+      "Bash(command -v psql)",
+      "Bash(command -v pg_ctl)",
+      "Bash(command -v brew)",
+      "Bash(export TRADABOT_DATABASE_URL=\"sqlite+aiosqlite:////private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/704669f9-d39e-4e60-bd47-8635f8ba8a8d/scratchpad/verify.db\")",
+      "Bash(.venv/bin/mypy app/scanner)",
+      "Bash(export TRADABOT_DATABASE_URL=\"sqlite+aiosqlite:////private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/704669f9-d39e-4e60-bd47-8635f8ba8a8d/scratchpad/m7.db\")",
+      "Bash(awk '{s+=$2} END {print \"tests:\", s}')",
+      "Bash(.venv/bin/pytest tests/unit/test_notification_formatters.py tests/integration/test_notification_summary_and_cli.py -q)",
+      "Bash(.venv/bin/pytest tests/unit/test_scanner_analysis.py -q)",
+      "Bash(.venv/bin/pytest tests/integration/test_scanner_cycle.py -q)",
+      "Bash(.venv/bin/pytest tests/integration/test_scanner_cycle.py::test_every_evaluation_is_stored_regardless_of_threshold -q)",
+      "Bash(.venv/bin/pytest tests/integration/test_scanner_cycle.py::test_the_demo_instrument_reaches_the_thresholds -q)",
+      "Bash(.venv/bin/pytest tests/api/test_scanner_endpoints.py -q)",
+      "Bash(.venv/bin/mypy app/notifications/summary.py)",
+      "Bash(.venv/bin/pytest tests/unit/test_portfolio_routing.py -q)",
+      "Bash(.venv/bin/pytest tests/integration/test_portfolio_isolation.py -q)",
+      "Bash(.venv/bin/pytest tests/unit/test_ops_launchd.py -q)",
+      "Bash(grep -cE \"^TRADABOT_DISCORD__PAPER_\\(100|1000|10000\\)_WEBHOOK=$\" .env.example)"
     ]
   }
 }

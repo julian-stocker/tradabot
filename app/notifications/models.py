@@ -38,6 +38,9 @@ class NotificationMessage:
     key: str | None = None
     """Carried through from the event, so a backend or an audit row can identify
     the subject without parsing the rendered text."""
+    routing_key: str | None = None
+    """Destination within the category, e.g. ``"paper-100"``. A backend resolves
+    it to a channel; ``None`` means the category's default destination."""
     fields: dict[str, str] = field(default_factory=dict)
     """Structured detail, for backends that can render it natively. The body
     already contains this information -- these are for machines, not humans."""

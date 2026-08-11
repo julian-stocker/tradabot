@@ -120,6 +120,8 @@ class SimulationProfileRepository:
         row.risk_profile_id = risk_id
         row.broker_cost_profile_id = cost_id
         row.enabled = config.enabled
+        row.owner_id = config.owner_id
+        row.notification_channel = config.notification_channel
         await self._session.flush()
         return row.id
 
@@ -234,6 +236,8 @@ def _profile_to_domain(row: SimulationProfile) -> SimulationProfileConfig:
         initial_capital=row.initial_capital,
         currency=row.currency,
         enabled=row.enabled,
+        owner_id=row.owner_id,
+        notification_channel=row.notification_channel,
         risk=RiskConfig(
             id=row.risk_profile.id,
             name=row.risk_profile.name,

@@ -73,9 +73,38 @@ adding a destination does not touch the emitters.
 | Category | Events | Channel |
 |---|---|---|
 | `market` | `MarketSignalQualified`, `...Strengthened`, `...Invalidated`, `MarketOverview` | #market-signals |
-| `paper_trade` | `PaperTradeOpened`, `...Closed`, `...Skipped` | #paper-trades |
+| `paper_trade` | `PaperTradeOpened`, `...Closed`, `...Skipped` | **per portfolio** — see below |
 | `performance` | `PortfolioPerformanceSummary`, `DailySimulationSummary` | #performance |
 | `system` | sync failures, stale data, provider up/down, lifecycle, critical errors | #tradabot-system |
+
+tradabot posts to those six channels and **never** to any other. #allgemein or
+any community channel receives nothing automated, ever.
+
+### Portfolio routing
+
+A paper-trade event carries a **`routing_key`** — `paper-100`, `paper-1000`,
+`paper-10000` — which wins over the category default:
+
+```
+Event.routing_key  →  NotificationMessage.routing_key  →  webhook lookup
+```
+
+The key comes from `simulation_profiles.notification_channel`, **persistent
+portfolio identity**. It is never derived from message content: routing on what a
+message happens to say breaks the moment the wording changes, and never loudly.
+
+There is no `if capital == 100` anywhere. The settings validator collects any
+`TRADABOT_DISCORD__PAPER_<N>_WEBHOOK` generically, so adding a `paper-250` is one
+environment variable plus one entry in `app/simulation/portfolios.py` — no change
+to notification or trading logic. A test asserts a portfolio that exists nowhere
+in the codebase routes correctly.
+
+`TRADABOT_DISCORD__TRADES_WEBHOOK` remains as a **fallback only**, used when a
+portfolio has no destination of its own, so an installation mid-migration keeps
+delivering rather than going quiet.
+
+#market-signals stays **global**: it carries the signal, not any portfolio's
+state.
 
 ## Severity
 
@@ -245,6 +274,14 @@ This is a hard requirement, not a preference. The database is the dataset a
 future ML phase trains on, and a dataset filtered by "what was interesting enough
 to post to a chat channel" would carry a selection bias impossible to correct for
 afterwards — one that would look like signal.
+
+## Who emits these events
+
+Phase 4 wired the emitters. The scanner calls `notify_signal` on a lifecycle
+transition (qualified / strengthened / invalidated) **after** the symbol's
+transaction has committed, and emits a grouped paper-decision event when a
+qualified signal reaches the simulation profiles. See
+[scanner.md](scanner.md) and [signal-lifecycle.md](signal-lifecycle.md).
 
 ## Adding a backend
 

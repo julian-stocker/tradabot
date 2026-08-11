@@ -8,6 +8,7 @@ from app.db.models.candle import Candle
 from app.db.models.corporate_action import CorporateActionRow
 from app.db.models.instrument import Instrument
 from app.db.models.notification import NotificationAttempt, NotificationState
+from app.db.models.ownership import ExternalAccountConnection, TradabotUser
 from app.db.models.paper import (
     DecisionOutcome,
     PortfolioSnapshot,
@@ -15,6 +16,12 @@ from app.db.models.paper import (
     VirtualPortfolio,
     VirtualPosition,
     VirtualTrade,
+)
+from app.db.models.scanner import (
+    ScanRun,
+    SignalEvaluation,
+    TrackedSignal,
+    WatchlistEntry,
 )
 from app.db.models.signal import SignalRow
 from app.db.models.simulation import BrokerCostProfile, RiskProfile, SimulationProfile
@@ -25,16 +32,22 @@ __all__ = [
     "Candle",
     "CorporateActionRow",
     "DecisionOutcome",
+    "ExternalAccountConnection",
     "Instrument",
     "NotificationAttempt",
     "NotificationState",
     "PortfolioSnapshot",
     "RiskProfile",
+    "ScanRun",
+    "SignalEvaluation",
     "SignalRow",
     "SimulationProfile",
+    "TrackedSignal",
+    "TradabotUser",
     "TradeDecisionRow",
     "VirtualOrder",
     "VirtualPortfolio",
     "VirtualPosition",
     "VirtualTrade",
+    "WatchlistEntry",
 ]

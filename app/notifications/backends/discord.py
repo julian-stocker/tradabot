@@ -70,31 +70,41 @@ class DiscordWebhookNotifier:
         """Last failure. Never contains a webhook URL."""
         return self._last_error
 
-    def webhook_for(self, category: EventCategory) -> str | None:
-        """The configured webhook for a category, or None.
+    def webhook_for(self, category: EventCategory, routing_key: str | None = None) -> str | None:
+        """The destination for a message, or None.
+
+        A ``routing_key`` wins over the category default: that is what sends a
+        paper-100 trade to #paper-100 rather than to a single shared channel. The
+        key comes from persistent portfolio identity, so routing never depends on
+        what a message happens to say.
 
         Returning ``None`` rather than raising lets an operator configure the
-        channels they care about and leave the rest empty, which is a reasonable
-        thing to want and not an error.
+        channels they care about and leave the rest empty.
         """
-        secret = {
+        if routing_key is not None:
+            secret = self._settings.webhook_for_portfolio(routing_key)
+            url = secret.get_secret_value().strip() if secret is not None else ""
+            return url or None
+
+        default = {
             EventCategory.MARKET: self._settings.market_webhook,
             EventCategory.PAPER_TRADE: self._settings.trades_webhook,
             EventCategory.PERFORMANCE: self._settings.performance_webhook,
             EventCategory.SYSTEM: self._settings.system_webhook,
         }[category]
-        url = secret.get_secret_value().strip()
+        url = default.get_secret_value().strip()
         return url or None
 
     async def send(self, message: NotificationMessage) -> DeliveryResult:
         """Deliver one message, retrying what is worth retrying."""
-        url = self.webhook_for(message.category)
+        url = self.webhook_for(message.category, message.routing_key)
         if url is None:
-            # Not a failure: nothing is configured for this channel.
+            # Not a failure: nothing is configured for this destination.
+            destination = message.routing_key or message.category.value
             return DeliveryResult(
                 backend=BACKEND_NAME,
                 delivered=False,
-                error=f"no webhook configured for category '{message.category.value}'",
+                error=f"no webhook configured for destination '{destination}'",
                 attempts=0,
             )
 
@@ -105,10 +115,14 @@ class DiscordWebhookNotifier:
             # produces one. A monitoring channel must not be able to ping a room.
             "allowed_mentions": {"parse": []},
         }
-        return await self._post(url, payload, message.category)
+        return await self._post(url, payload, message.category, message.routing_key)
 
     async def _post(
-        self, url: str, payload: Mapping[str, Any], category: EventCategory
+        self,
+        url: str,
+        payload: Mapping[str, Any],
+        category: EventCategory,
+        routing_key: str | None = None,
     ) -> DeliveryResult:
         """POST with bounded retries and exponential backoff plus jitter.
 
@@ -150,11 +164,13 @@ class DiscordWebhookNotifier:
             await asyncio.sleep(self._backoff(delay, last_status, last_response))
             delay *= 2
 
-        error = f"{category.value}: {redact(last_error or 'delivery failed')}"
+        destination = routing_key or category.value
+        error = f"{destination}: {redact(last_error or 'delivery failed')}"
         self._last_error = error
         logger.warning(
             "discord delivery failed",
             category=category.value,
+            destination=routing_key or category.value,
             status=last_status,
             attempts=attempts,
             error=redact(last_error or ""),

@@ -153,6 +153,32 @@ makes one possible.
 
 ---
 
+## Phase 4.1 — Local operations and portfolio-aware Discord ✅
+
+**Entry:** phase 4.
+
+**Delivered:** three personal paper portfolios (100 / 1000 / 10000 EUR, balanced,
+completely isolated) each with its own Discord channel; routing by persistent
+portfolio identity rather than message content or capital; a `TradabotUser`
+ownership boundary and an `ExternalAccountConnection` record that stores a
+credential *reference* and never a secret; macOS launchd generation with an
+explicit, reversible install; an `ops check` pre-flight; SQLite WAL and busy
+timeout for overlapping scheduled jobs; session-aware, deduplicated daily
+summary.
+
+**Not delivered, deliberately:** authentication, per-user watchlists, a Discord
+bot, slash commands, Alpaca OAuth, any secret in the database, and any automatic
+scheduler installation. `docs/multi-user-roadmap.md` and
+`docs/provider-connections.md` describe those as future work and say plainly that
+they do not exist.
+
+**The honest limitation:** a sleeping laptop is not 24/7 monitoring. On wake the
+data catches up and state survives, but a signal that qualified while the lid was
+shut produces no retrospective notification -- announcing a two-hour-old entry as
+if it were current would be worse than silence.
+
+---
+
 ## Phase 3.5 — Discord notification infrastructure ✅
 
 **Entry:** phase 3b.
@@ -196,10 +222,9 @@ it decided.
 
 ---
 
-## Phase 4 — Continuous watchlist scanner and signal lifecycle
+## Phase 4 — Continuous watchlist scanner and signal lifecycle ✅
 
-**Entry:** phase 3.5 — a scanner that runs unattended needs somewhere to report,
-and that now exists.
+**Entry:** phase 3.5.
 
 The next phase, and the one that finally produces a dataset. Continuous
 evaluation of **real** market data on a schedule, persisting every candidate it
@@ -223,10 +248,28 @@ already knows how to identify.
 - Discord volume stays legible over a full trading day — which is what the
   phase 3.5 thresholds exist to be tested against
 
-**Hazard, stated up front:** scanning many instruments for "score > 75" is a
-multiple-comparisons trap. At any plausible false-positive rate it returns hits
-every day regardless of whether the signal predicts anything. The base-rate
-fields are mandatory for this reason, and every scan result must be stored so its
+**Delivered:** a persistent watchlist (52 symbols, 9 sectors, seeded from data);
+four timeframes with explicit roles and measured agreement; price-structure
+metrics; `SignalEvaluation` persistence for *every* candidate; a signal lifecycle
+with stable identity; deterministic ranking; a database-backed scan lease;
+scanner CLI and read-only API; and a deterministic offline demo.
+
+**Four bugs the implementation surfaced**, each of which would have been silent:
+SQLite's bound-parameter ceiling failing intraday backfills; a flat staleness
+tolerance marking every *daily* series permanently stale (nothing would ever have
+qualified); a demo that advanced the clock rather than the data, showing the 1h
+series the same bars every phase; and a test suite that inherited the developer's
+`.env` and broke when real webhooks were configured.
+
+**What the engine actually does:** it cannot reach 75 on price trend alone. With
+flat volume, momentum and trend saturate near 97-99 and the score tops out around
+63 — half the weight sits in components a smooth trend leaves neutral. Reaching
+75 needs a volume step change too. Expect few qualifying signals.
+
+**Hazard, restated because it now applies:** scanning many instruments for
+"score > 75" is a multiple-comparisons trap. At any plausible false-positive rate
+it returns hits regardless of whether the signal predicts anything. `hit_rate` is
+reported with every scan for this reason, and every evaluation is stored so
 forward performance can be measured in phase 5. **A busy Discord channel is not
 evidence of a working strategy** — it is evidence of a threshold.
 

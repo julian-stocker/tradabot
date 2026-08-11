@@ -41,10 +41,34 @@ DEFAULT_BACKFILL_DAYS = 400
 """How far back an instrument with no stored bars is seeded. Comfortably past the
 61-bar feature warm-up without pulling a decade on first run."""
 
+BACKFILL_DAYS_BY_TIMEFRAME: dict[Timeframe, int] = {
+    Timeframe.M1: 5,
+    Timeframe.M5: 20,
+    Timeframe.M15: 45,
+    Timeframe.M30: 90,
+    Timeframe.H1: 180,
+    Timeframe.H4: 400,
+    Timeframe.D1: DEFAULT_BACKFILL_DAYS,
+    Timeframe.W1: 2_000,
+}
+"""Backfill window per timeframe, sized to the *bars* the features need rather
+than to a calendar span.
+
+400 days of daily bars is 400 rows; 400 days of 5-minute bars is over 30,000, and
+warming up a 50-period EMA needs about sixty of them either way. Pulling the same
+calendar window for every timeframe wastes provider quota, database space and
+scan time to compute an identical answer."""
+
+
 REFETCH_OVERLAP_BARS = 3
 """Incremental syncs re-request a few bars before the newest stored one. Providers
 revise recently published bars (late prints, consolidated-tape corrections), and
 the upsert makes re-fetching free."""
+
+
+def backfill_days_for(timeframe: Timeframe) -> int:
+    """How far back to seed a timeframe with no stored history."""
+    return BACKFILL_DAYS_BY_TIMEFRAME.get(timeframe, DEFAULT_BACKFILL_DAYS)
 
 
 @dataclass
@@ -244,7 +268,7 @@ class MarketDataImportService:
         symbol: str,
         timeframe: Timeframe = Timeframe.D1,
         now: datetime | None = None,
-        backfill_days: int = DEFAULT_BACKFILL_DAYS,
+        backfill_days: int | None = None,
     ) -> ImportReport:
         """Bring one symbol up to date from its newest stored bar.
 
@@ -272,10 +296,13 @@ class MarketDataImportService:
         latest = await self._candles.latest_timestamp(
             instrument_id=instrument.id, timeframe=timeframe
         )
+        # A caller may override the window; otherwise it is sized to the
+        # timeframe, so a 5-minute series is not backfilled a year deep.
+        days = backfill_days if backfill_days is not None else backfill_days_for(timeframe)
         start = (
             latest - timeframe.duration * REFETCH_OVERLAP_BARS
             if latest is not None
-            else end - timedelta(days=backfill_days)
+            else end - timedelta(days=days)
         )
         if start >= end:
             return ImportReport(

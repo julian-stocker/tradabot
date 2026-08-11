@@ -6,7 +6,10 @@
 .PHONY: help install dev test test-cov lint format format-check typecheck check \
         migrate migration downgrade seed seed-profiles demo-simulation signal \
         market-data-status market-data-import market-data-sync quote simulate \
-        smoke-real-data notify-test notify-status daily-summary up down logs clean
+        smoke-real-data notify-test notify-status daily-summary \
+        watchlist-seed scan scan-sync candidates demo-scanner \
+        portfolios-seed portfolios ops-check ops-status ops-install ops-start \
+        ops-stop ops-uninstall up down logs clean
 
 PYTHON ?= python3.12
 VENV   := .venv
@@ -101,6 +104,51 @@ notify-status: ## Show notification configuration and delivery outcomes
 
 daily-summary: ## Build and send the daily portfolio report
 	$(BIN)/python -m app.cli notifications daily-summary
+
+watchlist-seed: ## Seed the initial development universe
+	$(BIN)/python -m app.cli watchlist seed
+
+scan: ## Run one scan cycle
+	$(BIN)/python -m app.cli scanner run-once
+
+scan-sync: ## Incrementally sync watchlist market data
+	$(BIN)/python -m app.cli scanner sync
+
+candidates: ## Show ranked current candidates
+	$(BIN)/python -m app.cli scanner candidates
+
+demo-scanner: ## Deterministic offline scanner demonstration
+	$(BIN)/python -m app.cli scanner demo
+
+portfolios-seed: ## Install the three personal paper portfolios
+	$(BIN)/python -m app.cli portfolios seed
+
+portfolios: ## Show portfolio equity and positions
+	$(BIN)/python -m app.cli portfolios list
+
+ops-check: ## Validate this installation can run unattended
+	$(BIN)/python -m app.cli ops check
+
+ops-status: ## What has run, and where the portfolios stand
+	$(BIN)/python -m app.cli ops status
+
+ops-install: ## Write launchd templates (starts nothing)
+	$(BIN)/python -m app.cli ops install
+
+ops-start: ## Load the LaunchAgents (starts the schedule)
+	@for p in $$HOME/Library/LaunchAgents/com.tradabot.*.plist; do \
+		[ -e "$$p" ] || { echo "no templates; run make ops-install first"; exit 1; }; \
+		launchctl load -w "$$p" && echo "loaded $$p"; \
+	done
+
+ops-stop: ## Unload the LaunchAgents (stops the schedule)
+	@for p in $$HOME/Library/LaunchAgents/com.tradabot.*.plist; do \
+		[ -e "$$p" ] || exit 0; \
+		launchctl unload -w "$$p" && echo "unloaded $$p"; \
+	done
+
+ops-uninstall: ## Print the commands to remove the LaunchAgents
+	$(BIN)/python -m app.cli ops uninstall
 
 up: ## Start the Docker stack
 	docker compose up --build -d

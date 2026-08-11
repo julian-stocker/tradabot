@@ -291,7 +291,65 @@ ML phase trains on, and a dataset filtered by "what was interesting enough to
 post to a chat channel" would carry a selection bias that is impossible to
 correct for afterwards -- and that would look, in evaluation, like signal.
 
-### 16. UTC everywhere, enforced at the type level
+### 16. Signal identity is separate from signal observation
+
+`tracked_signals` is a continuing setup's **identity**; `signal_evaluations` is
+**what was known at time T**. One signal, many evaluations.
+
+The alternative -- a fresh signal row per scan -- makes "how long has this been
+true?" unanswerable and turns a fifteen-minute cadence into a stream of
+duplicate discoveries. The existing `signals` table is referenced rather than
+duplicated: it already holds a single-timeframe scored snapshot, and phase 4 adds
+the multi-timeframe context around it.
+
+Identity is the five-tuple (instrument, direction, primary timeframe, horizon,
+setup premise). A change in any of them starts a new signal, because merging two
+distinct setups loses information irrecoverably while splitting one is visible.
+
+### 17. The scan cycle owns no clock
+
+`run_scan_cycle(as_of)` does one pass and returns. It does not sleep, loop or
+schedule itself; an external scheduler decides the cadence, and the configured
+intervals are *declared* rather than enforced. A domain service owning its own
+clock would be untestable without waiting and unkillable mid-cycle.
+
+Concurrency is handled by a **database-backed lease** rather than process memory,
+so a second cron invocation, a restarted process or a second machine all contend
+correctly. Leases expire: a process killed mid-cycle must not lock the scanner
+until a human notices.
+
+### 18. Notification routing follows identity, not content
+
+A paper-trade event carries a ``routing_key`` taken from the portfolio's stored
+``notification_channel``. Routing never inspects the message.
+
+Deriving a destination from capital (``if capital == 100``) or from message text
+would couple delivery to two things that change for unrelated reasons -- a
+portfolio's size, and how a formatter happens to word a sentence. Both would fail
+silently. Instead the settings layer collects any ``PAPER_<N>_WEBHOOK``
+generically, so a new portfolio is configuration rather than code.
+
+### 19. Ownership exists before it is needed
+
+``tradabot_users`` holds one row and nothing authenticates against it. It exists
+now because ``simulation_profiles`` is about to accumulate live financial state,
+and adding an ownership column to that table later means migrating live records
+rather than configuration.
+
+``external_account_connections`` records *that* a connection exists and what for.
+It stores a ``credential_reference`` -- a pointer -- and the market-data registry
+never reads it. A database row must not be able to change which credentials the
+system authenticates with.
+
+### 20. Scheduling is generated, never installed
+
+``app/ops/launchd.py`` writes plists and prints ``launchctl`` commands. Nothing
+loads them, and no test does either: a suite that scheduled jobs on the machine
+running it would be a hostile thing to ship. The plists contain no credential --
+the jobs read ``.env`` from a working directory, because
+``~/Library/LaunchAgents`` is world-readable and backed up.
+
+### 21. UTC everywhere, enforced at the type level
 
 `ensure_utc` **rejects naive datetimes** rather than assuming UTC. Guessing is how
 off-by-one-session bugs get into backtests. The `UTCDateTime` column type normalises

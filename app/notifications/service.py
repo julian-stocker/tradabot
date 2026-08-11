@@ -272,14 +272,34 @@ class NotificationService:
         await self.publish(event)
         return True
 
-    async def send_test(self, category: EventCategory | None = None) -> list[str]:
-        """Send a clearly-labelled test message to each configured channel.
+    async def send_test(
+        self, category: EventCategory | None = None, *, routing_keys: Sequence[str] = ()
+    ) -> list[str]:
+        """Send a clearly-labelled test message to each configured destination.
 
-        Returns the categories attempted. Contains nothing secret: the payload
+        Covers the category channels **and** each portfolio channel, so routing
+        can be verified end to end without opening a paper trade. Creating a
+        real trade to test a webhook would put a fabricated position in the
+        database, which is a much worse trade than sending a message that says
+        TEST.
+
+        Returns the destinations attempted. Contains nothing secret: the payload
         names the channel and the environment, and neither is a credential.
         """
-        categories = [category] if category is not None else list(EventCategory)
         sent: list[str] = []
+
+        for key in routing_keys:
+            event = Event(
+                type=EventType.NOTIFICATION_TEST,
+                occurred_at=utc_now(),
+                payload={"channel": key, "environment": self._settings.env.value},
+                key=f"test:{key}",
+                routing_key=key,
+            )
+            await self._deliver(format_event(event))
+            sent.append(key)
+
+        categories = [category] if category is not None else list(EventCategory)
         for target in categories:
             event = Event(
                 type=EventType.NOTIFICATION_TEST,

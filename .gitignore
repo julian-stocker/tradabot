@@ -21,6 +21,9 @@ htmlcov/
 .env.*
 !.env.example
 
+# Scheduled-job logs (launchd writes here; never committed)
+logs/
+
 # Local data
 data/
 *.db
