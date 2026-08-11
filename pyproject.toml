@@ -97,6 +97,10 @@ ignore = [
 "app/db/types.py" = ["ARG002"]
 "migrations/**" = ["ANN", "ARG", "N", "E501"]
 "app/cli.py" = ["T20"]
+# The research commands print tables to a terminal, same as `app/cli.py`;
+# they live in their own module only because `cli.py` is already the largest
+# file in the project.
+"app/research/cli.py" = ["T20"]
 # The Alpaca SDK is imported lazily inside methods on purpose: the module must
 # stay importable with the SDK absent and no credentials configured, so that
 # `provider=mock` never pays for it and the registry can list Alpaca without

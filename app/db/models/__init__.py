@@ -17,6 +17,7 @@ from app.db.models.paper import (
     VirtualPosition,
     VirtualTrade,
 )
+from app.db.models.research import BacktestRun, SignalOutcome, TradeOutcome
 from app.db.models.scanner import (
     ScanRun,
     SignalEvaluation,
@@ -28,6 +29,7 @@ from app.db.models.simulation import BrokerCostProfile, RiskProfile, SimulationP
 from app.db.models.trade_decision import TradeDecisionRow
 
 __all__ = [
+    "BacktestRun",
     "BrokerCostProfile",
     "Candle",
     "CorporateActionRow",
@@ -40,11 +42,13 @@ __all__ = [
     "RiskProfile",
     "ScanRun",
     "SignalEvaluation",
+    "SignalOutcome",
     "SignalRow",
     "SimulationProfile",
     "TrackedSignal",
     "TradabotUser",
     "TradeDecisionRow",
+    "TradeOutcome",
     "VirtualOrder",
     "VirtualPortfolio",
     "VirtualPosition",

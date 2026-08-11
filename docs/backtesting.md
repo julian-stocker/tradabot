@@ -155,16 +155,114 @@ yield ~10 "significant" results from pure chance.
 
 ---
 
-## Implementation checklist (phase 4)
+## Implementation status (phase 5)
 
-- [ ] `DataFeed` bounded by `as_of`, verified by a prefix-invariance test like the
-      feature one
-- [ ] Execution lag of at least one bar, asserted in tests
-- [ ] Spread + slippage applied adversely on both legs
-- [ ] Volume-capped fills; no fill on zero volume
-- [ ] `listed_at` / `delisted_at` on instruments, and a point-in-time universe
-- [ ] Purge gap between train and test windows
-- [ ] Gross, net, and benchmark returns reported together
-- [ ] Configurations-tried count in every result
-- [ ] A deliberately look-ahead-biased strategy in the test suite, asserted to score
-      *impossibly* well — proving the harness detects it
+The engine now exists. `app/backtesting/engine.py` replays historical instants
+through **the production analyser, feature service and signal engine** -- there is
+no separate backtest strategy, because a second implementation drifts from
+production and then every comparison measures the drift.
+
+- [x] `DataFeed` bounded by `as_of` (`app/backtesting/feed.py`), and the bound is
+      now **bar close**, not bar start -- see below
+- [x] Execution lag of at least one bar, asserted in
+      `tests/unit/test_backtest_execution.py`
+- [x] Spread + slippage applied adversely on both legs, via the production
+      `estimate_round_trip_cost`
+- [x] Gross, net and itemised costs reported together
+- [x] Purge/embargo metadata exported (`reference_timestamp`,
+      `label_end_timestamp`, `session_date`) -- see docs/ml-readiness.md
+- [ ] `listed_at` / `delisted_at` on instruments -- **still absent**, see
+      *Survivorship* below
+- [ ] Volume-capped fills
+- [ ] A deliberately look-ahead-biased strategy asserted to score impossibly well
+
+---
+
+## The bar-close rule
+
+Candles are stamped when they **open**. So "bars before `as_of`" and "bars that
+had finished by `as_of`" are different sets, and only the second is safe.
+
+Phase 5 found the first one in production. `CandleRepository.get_latest` filtered
+`timestamp < as_of`, so at 14:20 the hourly bar stamped 14:00 -- which does not
+close until 15:00 -- was visible, close price included. Verified against the live
+database:
+
+```
+as_of = 2026-08-04 14:20  (the 14:00 H1 bar closes at 15:00)
+  bar_start=2026-08-04 13:00  closes=14:00  close=209.99
+  bar_start=2026-08-04 14:00  closes=15:00  close=209.57  <-- 40 minutes of future
+```
+
+The filter is now `timestamp <= as_of - timeframe.duration`, which is
+`bar_start + duration <= as_of` rearranged for the index. Walk-forward replay
+passes a bar's own timestamp and the previous bar closes exactly then, so the
+visible set there is unchanged; what changed is that the **live scanner** no
+longer scores a partially formed bar. Regression tests:
+`tests/integration/test_point_in_time.py`.
+
+---
+
+## Execution convention
+
+For a primary-timeframe bar closing at `T`:
+
+| Event | When |
+|---|---|
+| candle open | `T - duration` |
+| candle close | `T` -- the first instant its close price exists |
+| signal evaluation | `T`, from bars finished at or before `T` |
+| order decision | `T` |
+| earliest executable | the **next** bar's open, strictly after `T` |
+| fill | that next bar's open |
+
+A 5-minute candle closing at 10:05 produces a signal timed 10:05 which fills at
+the 10:05-10:10 bar's open. It never fills at the 10:00 open -- that price had
+already passed when the information arrived. Where conventions differ the
+pessimistic one is taken: the gap between a signal bar's close and the next open
+is a real cost, and a close-fill backtest silently deletes it.
+
+---
+
+## Same-bar ambiguity
+
+When one candle's range spans both the target and the stop, OHLC records that
+both were touched but not in which order. The data cannot answer it.
+
+- **Labels** record `AMBIGUOUS_SAME_BAR` and refuse to choose
+  (`app/research/labels.py`). Resolving toward the target is how a backtest turns
+  its worst trades into its best ones.
+- **Execution** must resolve it to continue, and does so under
+  `CandleAmbiguityPolicy.CONSERVATIVE`: the stop is assumed to have come first.
+
+Keeping the ambiguity visible as its own outcome is what makes it possible to
+measure how many results depend on the guess.
+
+---
+
+## Survivorship
+
+**This backtest is not survivorship-bias-free, and must not be described as
+one.** `instruments` carries no `listed_at`/`delisted_at`, so
+`HistoricalDataFeed.universe()` returns today's watchlist for every historical
+date. The 52 symbols are today's survivors; any name that was delisted or
+acquired during the window is simply absent, and the results are biased upward by
+an unmeasured amount.
+
+The limitation is recorded on every run's `universe_definition` and stated in the
+benchmark report rather than hidden.
+
+---
+
+## What a historical backtest proves
+
+**It proves** that the data pipeline, the feature computation, the signal engine,
+the execution model and the cost accounting run end to end over real market data,
+chronologically, without reading the future -- and it produces a measured
+distribution of outcomes across the score range.
+
+**It does not prove predictive edge.** It is one strategy over one window on one
+universe with no significance testing, no multiple-comparison correction and no
+out-of-sample discipline. The window available here (see docs/research-dataset.md)
+is months, not years. A positive result means the plumbing works and the numbers
+are worth looking at again on more data.

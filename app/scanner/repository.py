@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.core.logging import get_logger
 from app.core.time import utc_now
@@ -282,7 +283,15 @@ class TrackedSignalRepository:
 
 
 class SignalEvaluationRepository:
-    """Every observation the scanner made. **This is the ML dataset.**"""
+    """Every observation the scanner made. **This is the ML dataset.**
+
+    Live and backtested observations share this table, distinguished by
+    ``backtest_run_id``. Every read here is **live-only by default**: a
+    historical replay writes thousands of rows with past timestamps, and if the
+    live candidate list, the daily summary or the operations counts picked those
+    up, a research job would silently rewrite what the operator sees. Research
+    callers opt in explicitly with ``include_backtest``.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -299,7 +308,7 @@ class SignalEvaluationRepository:
         return evaluation
 
     async def latest_for_instrument(
-        self, instrument_id: int, *, limit: int = 20
+        self, instrument_id: int, *, limit: int = 20, include_backtest: bool = False
     ) -> Sequence[SignalEvaluation]:
         stmt = (
             select(SignalEvaluation)
@@ -307,10 +316,11 @@ class SignalEvaluationRepository:
             .order_by(SignalEvaluation.evaluated_at.desc())
             .limit(limit)
         )
+        stmt = _live_only(stmt, include_backtest)
         return (await self._session.execute(stmt)).scalars().all()
 
     async def for_signal(
-        self, tracked_signal_id: int, *, limit: int = 100
+        self, tracked_signal_id: int, *, limit: int = 100, include_backtest: bool = False
     ) -> Sequence[SignalEvaluation]:
         stmt = (
             select(SignalEvaluation)
@@ -318,10 +328,11 @@ class SignalEvaluationRepository:
             .order_by(SignalEvaluation.evaluated_at.desc())
             .limit(limit)
         )
+        stmt = _live_only(stmt, include_backtest)
         return (await self._session.execute(stmt)).scalars().all()
 
     async def latest_per_instrument(
-        self, *, qualified_only: bool = False
+        self, *, qualified_only: bool = False, include_backtest: bool = False
     ) -> Sequence[SignalEvaluation]:
         """The most recent evaluation for each instrument.
 
@@ -332,6 +343,7 @@ class SignalEvaluationRepository:
         stmt = select(SignalEvaluation).order_by(SignalEvaluation.evaluated_at.desc()).limit(2000)
         if qualified_only:
             stmt = stmt.where(SignalEvaluation.qualified.is_(True))
+        stmt = _live_only(stmt, include_backtest)
         rows = (await self._session.execute(stmt)).scalars().all()
 
         seen: dict[int, SignalEvaluation] = {}
@@ -339,12 +351,26 @@ class SignalEvaluationRepository:
             seen.setdefault(row.instrument_id, row)
         return list(seen.values())
 
-    async def count(self) -> int:
-        return len((await self._session.execute(select(SignalEvaluation.id))).scalars().all())
-
-    async def count_since(self, moment: datetime) -> int:
-        stmt = select(SignalEvaluation.id).where(SignalEvaluation.evaluated_at >= moment)
+    async def count(self, *, include_backtest: bool = False) -> int:
+        stmt = _live_only(select(SignalEvaluation.id), include_backtest)
         return len((await self._session.execute(stmt)).scalars().all())
+
+    async def count_since(self, moment: datetime, *, include_backtest: bool = False) -> int:
+        stmt = select(SignalEvaluation.id).where(SignalEvaluation.evaluated_at >= moment)
+        stmt = _live_only(stmt, include_backtest)
+        return len((await self._session.execute(stmt)).scalars().all())
+
+
+def _live_only(stmt: Select[Any], include_backtest: bool) -> Select[Any]:
+    """Restrict a query to observations the live scanner produced.
+
+    One place, so the filter cannot be applied to four read paths and forgotten
+    on the fifth -- which is exactly how research data leaks into an operator's
+    dashboard.
+    """
+    if include_backtest:
+        return stmt
+    return stmt.where(SignalEvaluation.backtest_run_id.is_(None))
 
 
 class ScanRunRepository:

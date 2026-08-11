@@ -17,6 +17,7 @@ from app.api.routes import (
     features,
     instruments,
     paper,
+    research,
     signals,
     simulation,
 )
@@ -30,4 +31,5 @@ api_router.include_router(paper.router)
 api_router.include_router(paper.overview_router)
 api_router.include_router(simulation.router)
 api_router.include_router(instruments.router)
+api_router.include_router(research.router)
 api_router.include_router(admin.router)

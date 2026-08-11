@@ -90,13 +90,28 @@ class CandleRepository:
         """The most recent ``limit`` candles, returned in **ascending** order.
 
         Args:
-            as_of: if given, only bars strictly before this time are considered.
+            as_of: if given, only bars that had **finished** by this instant are
+                considered.
 
         ``as_of`` is not a convenience -- it is the mechanism that makes
         historical analysis honest. Recomputing a signal "as it would have looked
         on 3 March" requires the query itself to refuse later bars; filtering them
         out afterwards is the kind of step that gets forgotten and silently
         reintroduces look-ahead bias.
+
+        Bar **close**, not bar start
+        ----------------------------
+        Candles are stamped at the instant they *open*, so ``timestamp < as_of``
+        is not the same question and is not safe: at 14:20 the hourly bar stamped
+        14:00 satisfies it, yet that bar does not finish until 15:00 and its close
+        price is forty minutes of future information. Filtering on the start
+        stamp therefore leaks the very thing ``as_of`` exists to exclude.
+
+        A bar is knowable once ``start + duration <= as_of``, which rearranges to
+        the index-friendly form used here. Callers that pass a bar's own
+        timestamp (walk-forward replay) are unaffected -- the previous bar closes
+        exactly at that instant and is still included -- so this bounds the live
+        scanner without altering replay ordering.
         """
         if limit < 1:
             msg = f"limit must be >= 1, got {limit}"
@@ -107,7 +122,7 @@ class CandleRepository:
             Candle.timeframe == timeframe,
         )
         if as_of is not None:
-            stmt = stmt.where(Candle.timestamp < ensure_utc(as_of))
+            stmt = stmt.where(Candle.timestamp <= ensure_utc(as_of) - timeframe.duration)
 
         stmt = stmt.order_by(Candle.timestamp.desc()).limit(min(limit, MAX_CANDLE_LIMIT))
         rows = (await self._session.execute(stmt)).scalars().all()

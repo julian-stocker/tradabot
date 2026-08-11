@@ -307,3 +307,46 @@ architecture, not a replacement for it.
 
 Each portfolio belongs to a `TradabotUser` — one local owner today. See
 [multi-user-roadmap.md](multi-user-roadmap.md).
+
+---
+
+## Historical execution (phase 5)
+
+`app/backtesting/execution.py` walks each portfolio forward over a replay's
+qualified observations. It **imports the production functions** --
+`derive_stop_and_target`, `size_position`, `evaluate_exit` -- rather than
+reimplementing the risk rules. A separate backtest copy would drift, and then the
+backtest would be measuring the copy rather than the strategy.
+
+### Sequential, with a real book
+
+Each portfolio carries cash, equity and a list of open positions keyed by exit
+time. When a signal arrives at `T`, positions that closed at or before `T` are
+settled first, then capacity is measured. Without that the book is always empty,
+`max_open_positions` never binds, and every signal looks affordable -- which was
+a real defect in the first benchmark run, visible only because the rejection
+counts were all zero.
+
+P&L is realised on **exit**, not on entry, so the equity curve is a sequence that
+could actually have happened.
+
+### What the three capital levels showed
+
+Over the first benchmark (16 qualified signals, 13 sessions), the same signals
+produced:
+
+| | net return | win rate | rejected |
+|---|---|---|---|
+| paper-100 | -39.2% | 0.0% | 3 |
+| paper-1000 | -16.3% | 15.4% | 3 |
+| paper-10000 | -14.0% | 15.4% | 3 |
+
+Identical market outcomes, a 25-point spread in net return. The flat per-order
+fee is the whole difference: on a 100 EUR account it is a double-digit percentage
+of every position, so the small portfolio needs a far larger move just to break
+even. This is the finding three portfolios exist to produce, and it would be
+invisible in a single blended result.
+
+**All three lost money.** The sample is too small to conclude anything about the
+strategy; what it does establish is that the cost model bites hardest exactly
+where the least capital is.

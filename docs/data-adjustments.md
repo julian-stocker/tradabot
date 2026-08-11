@@ -136,7 +136,9 @@ Callers that need to reconstruct what was knowable on a date pass `known_as_of`:
 
 ```python
 actions = await repository.list_for_instrument(
-    instrument_id=id, symbol="NVDA", known_as_of=datetime(2021, 3, 1, tzinfo=UTC),
+    instrument_id=id,
+    symbol="NVDA",
+    known_as_of=datetime(2021, 3, 1, tzinfo=UTC),
 )
 ```
 

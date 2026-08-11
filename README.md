@@ -155,6 +155,11 @@ make dev              # start the API with autoreload
 | `make ops-check` | Validate this installation can run unattended |
 | `make ops-install` / `ops-start` | Write launchd templates / start the schedule |
 | `make ops-status` / `ops-stop` / `ops-uninstall` | Inspect / stop / remove |
+| `make backtest FROM=… TO=…` | Replay history through the production scanner |
+| `make backtest-status` / `backtest-report RUN=id` | Recent runs / one run's full metadata |
+| `make outcomes` / `outcomes-status` | Compute outcome labels / label counts |
+| `make research-calibration HORIZON=1d` | Outcome quality by score band (measurement only) |
+| `make research-features` / `research-export` | Feature-vs-outcome tables / Parquet dataset |
 | `make up` / `make down` | Start / stop the Docker stack |
 | `make clean` | Remove caches and build artefacts |
 
@@ -272,7 +277,18 @@ These are known and deliberate, not oversights:
    of consolidated volume. Volume-based signal components computed on it measure
    IEX, not the market. See [docs/providers/alpaca.md](docs/providers/alpaca.md).
 4. **Signal weights are arbitrary.** They are legible guesses, marked as such
-   everywhere they appear. Do not read meaning into a score of 42.
+   everywhere they appear. Do not read meaning into a score of 42. The phase 5
+   benchmark found outcome quality is **not** monotonic in score — and the sample
+   above the 75 threshold was 27 observations, far too few to justify a change.
+5. **Backtests are not survivorship-bias-free.** Instruments carry no
+   `listed_at`/`delisted_at`, so a historical universe resolves to today's
+   survivors. See [docs/backtesting.md](docs/backtesting.md).
+6. **Every historical transaction cost is modelled, never observed.** No
+   historical quotes are stored, so backtested costs are a versioned assumption
+   labelled `MODELLED`. See [docs/data-quality.md](docs/data-quality.md).
+7. **Deep intraday history is weeks, not years.** A production-faithful replay
+   needs all four timeframes and is currently limited to ~15 sessions. See
+   [docs/research-dataset.md](docs/research-dataset.md).
 5. **No backtester.** Only the data structures and protocols exist. Any claim about
    historical performance is currently unsupported.
 6. **No machine learning.** By design — see [docs/ml.md](docs/ml.md).
@@ -343,7 +359,10 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps
 - [docs/simulation-timing.md](docs/simulation-timing.md) — execution timing and no-look-ahead rules
 - [docs/roadmap.md](docs/roadmap.md) — phased plan
-- [docs/backtesting.md](docs/backtesting.md) — bias constraints the future engine must satisfy
+- [docs/backtesting.md](docs/backtesting.md) — the replay engine, execution convention, bias constraints
+- [docs/outcome-labels.md](docs/outcome-labels.md) — horizons, MFE/MAE, barriers, same-bar ambiguity
+- [docs/research-dataset.md](docs/research-dataset.md) — the exported dataset, columns, sampling policy
+- [docs/ml-readiness.md](docs/ml-readiness.md) — why a random train/test split is invalid here
 - [docs/ml.md](docs/ml.md) — how models will be introduced, and the evaluation rules
 
 ---

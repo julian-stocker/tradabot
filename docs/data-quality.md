@@ -137,3 +137,51 @@ every check here.
 They also say nothing about whether the data supports a strategy. Clean data and
 a profitable backtest are independent claims, and this module only makes the
 first one.
+
+---
+
+## Bar staleness is not quote sanity (phase 5)
+
+Phase 4 recorded after-hours spreads of 883-1118 bps on mega-caps with
+`data_quality=OK`. That flag was **not wrong**: the bars were fine, fresh and
+complete. It was answering a different question.
+
+- `DataQuality` asks *how old is the newest bar?*
+- `SpreadQuality` asks *can this quote be believed as an executable cost?*
+
+Conflating them let an unusable number through unlabelled, and it will happen
+again in any system that keeps only one flag.
+
+### SpreadQuality
+
+| Value | Meaning |
+|---|---|
+| `REGULAR_SESSION` | quoted in-session and within a plausible range -- the only value treated as reliable |
+| `EXTENDED_HOURS` | pre/post-market: real, but not comparable to session spreads |
+| `SUSPICIOUS_SPREAD` | implausibly wide *during* regular hours (> 100 bps) |
+| `STALE` | the quote was too old to describe that instant |
+| `MISSING` | no quote at all -- the normal case for every historical row |
+
+Checks run in that order deliberately. Missing beats everything; then staleness
+(an old quote's width describes the wrong moment); then session; and only then
+plausibility. Checking width *before* session is the mistake that would relabel
+every legitimate extended-hours quote as broken.
+
+A 900 bps spread at 21:30 UTC is not a malfunction. It is an accurate report of a
+nearly empty book, and it is classified `EXTENDED_HOURS`, not `SUSPICIOUS`.
+
+### Nothing is deleted
+
+Raw observations are preserved whatever the verdict. The classification is
+attached alongside so research queries can exclude what they must, and so the
+decision to exclude is visible in a manifest rather than buried in an ETL step.
+See docs/research-dataset.md.
+
+### No historical quotes exist
+
+tradabot stores OHLCV bars only; `get_latest_quote` is live-only. So **every**
+historical transaction cost is `MODELLED`, never `OBSERVED`, and every
+`trade_outcomes` row records which. Using the *current* quote for a historical
+fill would be look-ahead in its purest form -- a 2026 spread applied to a
+February trade, on an instrument that only has a current quote because it still
+trades.

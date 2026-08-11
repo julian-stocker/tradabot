@@ -50,6 +50,7 @@ from app.ownership.service import ensure_local_ownership
 from app.paper.demo import run_demo
 from app.paper.performance import PerformanceSummary
 from app.paper.replay import REPLAY_DISCLAIMER, ReplayError, replay_symbol
+from app.research import cli as research_cli
 from app.scanner.demo import DemoResult, phase_boundaries, seed_demo_instrument
 from app.scanner.repository import (
     ScanRunRepository,
@@ -1079,6 +1080,75 @@ def _run_notifications(settings: Settings, args: argparse.Namespace) -> int:
     return asyncio.run(_notifications_test(settings, args.category))
 
 
+def _run_backtest(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``backtest`` subcommand."""
+
+    command = args.backtest_command
+    if command == "run":
+        return asyncio.run(
+            research_cli.backtest_run(
+                settings,
+                start=research_cli.parse_day(args.start),
+                end=research_cli.parse_day(args.end),
+                symbols=_parse_symbols(args.symbols) or None,
+                universe=args.universe,
+                timeframe=Timeframe(args.timeframe),
+                include_extended=args.include_extended,
+                skip_portfolios=args.no_portfolios,
+            )
+        )
+    if command == "status":
+        return asyncio.run(research_cli.backtest_status(settings, limit=args.limit))
+    return asyncio.run(research_cli.backtest_report(settings, run_id=args.run_id))
+
+
+def _run_outcomes(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch an ``outcomes`` subcommand."""
+
+    if args.outcomes_command == "generate":
+        return asyncio.run(
+            research_cli.outcomes_generate(
+                settings,
+                since=research_cli.parse_day(args.since) if args.since else None,
+                until=research_cli.parse_day(args.until) if args.until else None,
+                recompute=args.recompute,
+            )
+        )
+    return asyncio.run(research_cli.outcomes_status(settings))
+
+
+def _run_research(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``research`` subcommand."""
+
+    command = args.research_command
+    horizon = Horizon(args.horizon)
+    if command == "score-calibration":
+        return asyncio.run(
+            research_cli.research_calibration(
+                settings,
+                horizon=horizon,
+                run_id=args.run_id,
+                threshold_view=args.around_threshold,
+            )
+        )
+    if command == "features":
+        return asyncio.run(
+            research_cli.research_features(
+                settings, horizon=horizon, feature=args.feature, run_id=args.run_id
+            )
+        )
+    return asyncio.run(
+        research_cli.research_export(
+            settings,
+            horizon=horizon,
+            run_id=args.run_id,
+            directory=Path(args.out),
+            fmt=args.format,
+            include_extended=args.include_extended,
+        )
+    )
+
+
 _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
@@ -1105,6 +1175,9 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "scanner": _run_scanner,
     "portfolios": _run_portfolios,
     "ops": _run_ops,
+    "backtest": _run_backtest,
+    "outcomes": _run_outcomes,
+    "research": _run_research,
 }
 
 
@@ -1157,6 +1230,78 @@ def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: igno
     scanner_sub.add_parser("daily-summary", help="Send the daily report (alias)")
 
 
+def _add_research_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Backtesting, outcome labelling and research commands.
+
+    None of these mutate production state: the backtest tags its observations
+    with a run id that every live read filters out, so they are safe to run while
+    the scheduler is going.
+    """
+    backtest = sub.add_parser("backtest", help="Historical replay of the production scanner")
+    backtest_sub = backtest.add_subparsers(dest="backtest_command", required=True)
+
+    runner = backtest_sub.add_parser("run", help="Replay a date range and simulate portfolios")
+    runner.add_argument("--from", dest="start", required=True, help="YYYY-MM-DD (UTC)")
+    runner.add_argument("--to", dest="end", required=True, help="YYYY-MM-DD (UTC)")
+    runner.add_argument("--symbols", help="Comma-separated tickers; omit to use the watchlist")
+    runner.add_argument("--universe", choices=["active"], help="Replay the active watchlist")
+    runner.add_argument(
+        "--timeframe", default=Timeframe.H1.value, choices=[t.value for t in Timeframe]
+    )
+    runner.add_argument(
+        "--include-extended",
+        action="store_true",
+        help="Include pre/post-market observations (excluded from the benchmark by default)",
+    )
+    runner.add_argument(
+        "--no-portfolios", action="store_true", help="Generate observations only, no execution"
+    )
+
+    status = backtest_sub.add_parser("status", help="Recent backtest runs")
+    status.add_argument("--limit", type=int, default=10)
+
+    report = backtest_sub.add_parser("report", help="Full metadata for one run")
+    report.add_argument("run_id", type=int)
+
+    outcomes = sub.add_parser("outcomes", help="Future outcome labels for stored evaluations")
+    outcomes_sub = outcomes.add_subparsers(dest="outcomes_command", required=True)
+    generate = outcomes_sub.add_parser(
+        "generate", help="Compute labels; matures anything previously pending"
+    )
+    generate.add_argument("--since", help="Only evaluations from this date (YYYY-MM-DD)")
+    generate.add_argument("--until", help="Only evaluations up to this date (YYYY-MM-DD)")
+    generate.add_argument(
+        "--recompute", action="store_true", help="Also revisit labels already complete"
+    )
+    outcomes_sub.add_parser("status", help="Label counts by status and horizon")
+
+    research = sub.add_parser("research", help="Descriptive research reports and dataset export")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+
+    for name, helptext in (
+        ("score-calibration", "Outcome quality by score band (measurement only)"),
+        ("features", "Feature values against outcomes"),
+        ("export", "Write a versioned research dataset and manifest"),
+    ):
+        parser_ = research_sub.add_parser(name, help=helptext)
+        parser_.add_argument(
+            "--horizon", default=Horizon.D1.value, choices=[h.value for h in Horizon]
+        )
+        parser_.add_argument("--run-id", type=int, help="Limit to one backtest run")
+        if name == "score-calibration":
+            parser_.add_argument(
+                "--around-threshold",
+                action="store_true",
+                help="Use the finer 60-65..>=85 bands around the 75 cutoff",
+            )
+        if name == "features":
+            parser_.add_argument("--feature", help="One feature name, or 'sector'")
+        if name == "export":
+            parser_.add_argument("--out", default="exports", help="Output directory")
+            parser_.add_argument("--format", default="parquet", choices=["parquet", "csv"])
+            parser_.add_argument("--include-extended", action="store_true")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Every command and its arguments.
 
@@ -1191,6 +1336,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_scanner_parsers(sub)
     _add_ops_parsers(sub)
+    _add_research_parsers(sub)
 
     notify = sub.add_parser("notifications", help="Notification delivery")
     notify_sub = notify.add_subparsers(dest="notification_command", required=True)

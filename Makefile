@@ -150,6 +150,35 @@ ops-stop: ## Unload the LaunchAgents (stops the schedule)
 ops-uninstall: ## Print the commands to remove the LaunchAgents
 	$(BIN)/python -m app.cli ops uninstall
 
+# --- Research and backtesting -------------------------------------------------
+# All read-only with respect to production state: a replay tags its observations
+# with a run id that every live query filters out, so these are safe to run while
+# the scheduler is going.
+
+backtest: ## Replay the active watchlist (FROM=YYYY-MM-DD TO=YYYY-MM-DD)
+	$(BIN)/python -m app.cli backtest run --from $(FROM) --to $(TO) --universe active
+
+backtest-status: ## Recent backtest runs
+	$(BIN)/python -m app.cli backtest status
+
+backtest-report: ## Full metadata for one run (RUN=id)
+	$(BIN)/python -m app.cli backtest report $(RUN)
+
+outcomes: ## Compute outcome labels; matures anything previously pending
+	$(BIN)/python -m app.cli outcomes generate
+
+outcomes-status: ## Label counts by status and horizon
+	$(BIN)/python -m app.cli outcomes status
+
+research-calibration: ## Outcome quality by score band (measurement, not tuning)
+	$(BIN)/python -m app.cli research score-calibration --horizon $(or $(HORIZON),1d)
+
+research-features: ## Feature values against outcomes
+	$(BIN)/python -m app.cli research features --horizon $(or $(HORIZON),1d)
+
+research-export: ## Write a versioned research dataset and manifest
+	$(BIN)/python -m app.cli research export --horizon $(or $(HORIZON),1d) --out exports
+
 up: ## Start the Docker stack
 	docker compose up --build -d
 

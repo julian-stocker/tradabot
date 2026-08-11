@@ -89,8 +89,11 @@ class Horizon(StrEnum):
     """
 
     # Short term
+    M15 = "15m"
     M30 = "30m"
+    H1 = "1h"
     H2 = "2h"
+    H4 = "4h"
     D1 = "1d"
     # Medium term
     D3 = "3d"
@@ -125,8 +128,11 @@ class Horizon(StrEnum):
 
 
 _HORIZON_BUCKETS: dict[Horizon, HorizonBucket] = {
+    Horizon.M15: HorizonBucket.SHORT_TERM,
     Horizon.M30: HorizonBucket.SHORT_TERM,
+    Horizon.H1: HorizonBucket.SHORT_TERM,
     Horizon.H2: HorizonBucket.SHORT_TERM,
+    Horizon.H4: HorizonBucket.SHORT_TERM,
     Horizon.D1: HorizonBucket.SHORT_TERM,
     Horizon.D3: HorizonBucket.MEDIUM_TERM,
     Horizon.D5: HorizonBucket.MEDIUM_TERM,
@@ -137,8 +143,11 @@ _HORIZON_BUCKETS: dict[Horizon, HorizonBucket] = {
 }
 
 _HORIZON_DURATIONS: dict[Horizon, timedelta] = {
+    Horizon.M15: timedelta(minutes=15),
     Horizon.M30: timedelta(minutes=30),
+    Horizon.H1: timedelta(hours=1),
     Horizon.H2: timedelta(hours=2),
+    Horizon.H4: timedelta(hours=4),
     Horizon.D1: timedelta(days=1),
     Horizon.D3: timedelta(days=3),
     Horizon.D5: timedelta(days=5),
@@ -393,3 +402,96 @@ class CandleAmbiguityPolicy(StrEnum):
     CONSERVATIVE = "CONSERVATIVE"
     OPTIMISTIC = "OPTIMISTIC"
     INTRABAR_DATA_REQUIRED = "INTRABAR_DATA_REQUIRED"
+
+
+class LabelStatus(StrEnum):
+    """Whether an outcome label could actually be computed.
+
+    A horizon that has not elapsed yet is the common case for recent
+    observations, and it is **not** a zero return. Writing 0.0 for "we do not
+    know" poisons every statistic computed downstream: it drags means toward
+    zero, understates variance, and makes the most recent -- most relevant --
+    observations look like the flattest ones. So the absence is a state, not a
+    number, and the labelling job is re-runnable precisely so these mature.
+    """
+
+    COMPLETE = "COMPLETE"
+    """Enough future data existed; the label is real."""
+    PENDING = "PENDING"
+    """The horizon has not elapsed yet. Will complete on a later run."""
+    INSUFFICIENT_FUTURE_DATA = "INSUFFICIENT_FUTURE_DATA"
+    """The horizon elapsed but the bars are missing -- a gap, not a wait."""
+
+    @property
+    def is_usable(self) -> bool:
+        return self is LabelStatus.COMPLETE
+
+
+class BarrierOutcome(StrEnum):
+    """Which of a target/stop pair was reached first.
+
+    ``AMBIGUOUS_SAME_BAR`` is the honest answer whenever one candle's range spans
+    both levels: OHLC records the extremes but not their order, so the question
+    is unanswerable from the data rather than merely difficult. Recording it as
+    its own outcome -- instead of resolving it and moving on -- is what lets a
+    later analysis measure how much of a result rests on the guess. See
+    :class:`CandleAmbiguityPolicy` for how execution resolves it when it must.
+    """
+
+    TARGET_FIRST = "TARGET_FIRST"
+    STOP_FIRST = "STOP_FIRST"
+    NEITHER = "NEITHER"
+    """Neither level was touched before the horizon elapsed."""
+    AMBIGUOUS_SAME_BAR = "AMBIGUOUS_SAME_BAR"
+    """One bar touched both. Unknowable without intrabar data."""
+
+    @property
+    def is_resolved(self) -> bool:
+        return self in {BarrierOutcome.TARGET_FIRST, BarrierOutcome.STOP_FIRST}
+
+
+class SpreadQuality(StrEnum):
+    """How much trust a recorded spread deserves.
+
+    Separate from :class:`~app.scanner.enums.DataQuality` on purpose: bar
+    staleness and quote sanity are different questions, and the free IEX feed
+    answers them differently. A 900 bps spread on a mega-cap is not stale data --
+    the bars are fine -- it is a thin book after the close being reported
+    faithfully. Classifying it needs the session, not the bar age.
+
+    The raw observation is always preserved; this only tells research queries
+    which rows they may believe.
+    """
+
+    REGULAR_SESSION = "REGULAR_SESSION"
+    """Quoted during regular hours and within a plausible range."""
+    EXTENDED_HOURS = "EXTENDED_HOURS"
+    """Pre-market or after-hours: real, but not comparable to session spreads."""
+    SUSPICIOUS_SPREAD = "SUSPICIOUS_SPREAD"
+    """Implausibly wide for the instrument. Preserved, excluded from benchmarks."""
+    STALE = "STALE"
+    """The quote was too old to describe the market at that instant."""
+    MISSING = "MISSING"
+    """No quote at all -- the normal case for historical observations."""
+
+    @property
+    def is_reliable(self) -> bool:
+        """Whether a benchmark may use this spread as an executable cost."""
+        return self is SpreadQuality.REGULAR_SESSION
+
+
+class CostBasis(StrEnum):
+    """Where a transaction-cost figure came from.
+
+    Required on every trade outcome because the distinction is invisible in the
+    number itself. tradabot stores no historical quotes, so every backtested cost
+    is ``MODELLED``; presenting one as if it were measured would be the same
+    error as quoting a simulated fill as a real one.
+    """
+
+    OBSERVED = "OBSERVED"
+    """Derived from a quote recorded at that instant."""
+    MODELLED = "MODELLED"
+    """Estimated by a versioned cost model. Never call this 'actual'."""
+    UNAVAILABLE = "UNAVAILABLE"
+    """No basis for an estimate; the cost is unknown rather than zero."""

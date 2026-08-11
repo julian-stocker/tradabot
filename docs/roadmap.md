@@ -275,25 +275,40 @@ evidence of a working strategy** — it is evidence of a threshold.
 
 ---
 
-## Phase 5 — Backtesting engine
+## Phase 5 — Historical backtesting, outcome labels, research dataset ✅
 
-**Entry:** phase 3b. Point-in-time universe data exists as of phase 2, but
-backtesting synthetic data proves only that the harness runs.
+**Delivered.** Migrations 0009-0010.
 
 **Scope**
-- Event-driven engine over the `DataFeed` / `ExecutionModel` / `Strategy` protocols
-- Realistic fills: execution lag, adverse spread and slippage, volume caps
-- Position sizing, stops, portfolio-level constraints
-- Full metrics: gross/net/benchmark returns, drawdown, cost drag, trade history
+- `HistoricalReplay` over the phase-1 `DataFeed`/`ExecutionModel` protocols,
+  reusing the **production** analyser, feature service and signal engine -- there
+  is no separate backtest strategy
+- Explicit event-time model: signal at bar close, fill at the next bar's open
+- Outcome labels for 15m/1h/4h/1d/3d/5d/20d with MFE/MAE and barrier outcomes,
+  in their own tables ([outcome-labels.md](outcome-labels.md))
+- Versioned **modelled** historical transaction costs -- no historical quotes
+  exist, so no backtested cost is ever `OBSERVED`
+- `SpreadQuality`, separating quote sanity from bar staleness
+- Deterministic Parquet export with a manifest
+  ([research-dataset.md](research-dataset.md))
+- Research isolation: backtest observations carry `backtest_run_id`, which every
+  production read filters out, so a replay is safe while the scheduler runs
 
-**Exit**
-- Every constraint in [backtesting.md](backtesting.md) satisfied
-- A deliberately look-ahead-biased strategy in the test suite scores *impossibly* well,
-  proving the harness detects bias
-- The phase 1 heuristic weights are evaluated — and revised or discarded on the evidence
+**Found and fixed:** a real look-ahead leak in `CandleRepository.get_latest`,
+which filtered on bar *start* and so exposed partially formed bars to the live
+scanner. See [backtesting.md](backtesting.md).
 
-**This is the most important phase in the roadmap.** Everything before it produces
-untested hypotheses; everything after it depends on being able to falsify them.
+**Not delivered** (carried to phase 6)
+- `listed_at`/`delisted_at`: the historical universe is still today's survivors,
+  so this is **not** a survivorship-bias-free backtest
+- Volume-capped fills
+- A deliberately look-ahead-biased strategy asserted to score impossibly well
+- The phase 1 heuristic weights are **not** revised -- the sample above the 75
+  threshold is 27 observations, which cannot justify changing anything
+
+**What the first benchmark showed:** outcome quality is **not** monotonic in
+score, and the lowest-scoring band had the highest mean 5-day return over the
+window. That is a finding to sit with, not a reason to move a threshold.
 
 ---
 

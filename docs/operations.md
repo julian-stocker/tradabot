@@ -170,3 +170,45 @@ those observations cannot be recreated — the market has moved on.
 Never printed by any command or endpoint: Alpaca keys, Discord webhook URLs.
 `scanner status` and `/health/*` report *whether* something is configured, never
 what with. See [discord.md](discord.md#security).
+
+---
+
+## Research jobs (phase 5)
+
+Backtesting and labelling are **manual, not scheduled**, and they are safe to run
+while the LaunchAgents are going.
+
+```bash
+make backtest FROM=2026-07-24 TO=2026-08-11   # replay + per-portfolio execution
+make outcomes                                  # label; matures pending rows
+make research-calibration HORIZON=1d
+make research-export HORIZON=1d
+```
+
+### Why they cannot disturb the scheduler
+
+- Backtest observations are written to `signal_evaluations` with a
+  `backtest_run_id`. Every production read filters on `backtest_run_id IS NULL`,
+  so the candidate list, the daily summary and `ops status` never see them.
+- Nothing in the research path touches `tracked_signals`, `scan_runs`,
+  portfolios or notifications. No Discord message is ever sent.
+- No scan lease is taken, so the 15-minute scan is never blocked.
+- Writes commit per 8-symbol chunk (replay) and per 250-evaluation chunk
+  (labelling), so no single transaction holds the SQLite write lock for long.
+  With WAL and `busy_timeout=5000` a concurrent scan waits milliseconds.
+
+Asserted in `tests/integration/test_backtest_research.py`: a full replay leaves
+the tracked-signal, scan-run, position and notification counts unchanged.
+
+### Cost
+
+A 52-symbol replay over 13 sessions on the hourly timeframe takes roughly five
+minutes and produces ~3,700 observations. Labelling ~4,000 evaluations across
+seven horizons takes under two minutes. Both report their runtime.
+
+### Re-running
+
+Both are idempotent. A second `outcomes generate` updates rows in place rather
+than duplicating them, and completes anything that was pending. A second
+`backtest run` with the same configuration creates a new run row sharing the same
+`run_key` -- which is how reproducibility is checked, not an error.

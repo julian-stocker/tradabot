@@ -15,6 +15,7 @@ issues. Making Timescale mandatory would trade a real portability cost for a
 performance benefit that only matters at a data volume phase 1 does not have.
 
 """
+
 from __future__ import annotations
 
 import logging

@@ -404,17 +404,25 @@ Each is a deliberate phase 1 trade-off, not an oversight.
 5. **`symbol` is globally unique.** Real multi-venue listings (VOD on LSE vs. Xetra)
    need a `(symbol, exchange)` key. Mechanical migration later; guessing a venue today
    would not be.
-6. **Historical spreads are assumed, not stored.** Bars carry no quote, so a
-   replay applies the configured spread symmetrically around each price. It is
-   consistent between scoring and execution, and it is still an assumption: a real
-   spread widens exactly when it matters most. Storing historical quotes is phase 6.
+6. **Historical spreads are modelled, not stored.** Bars carry no quote, so
+   phase 5 estimates the spread from price, volatility, participation and session
+   (`app/research/costs.py`), stamps every figure `CostBasis.MODELLED`, and
+   versions the model. It is consistent between scoring and execution, and it is
+   still an assumption: a real spread widens exactly when it matters most.
+   Storing historical quotes is phase 6.
 7. **Regime is instrument-local.** A real regime signal needs market-wide inputs (index
    trend, breadth, a volatility index). Named honestly rather than overstated.
-8. **Historical signals use the configured default spread.** Today's spread was not
-   knowable in 2023; using it would be look-ahead in the cost model — the place people
-   rarely think to check. Storing historical quotes is phase 5.
+8. **A backtest is not survivorship-bias-free.** `instruments` has no
+   `listed_at`/`delisted_at`, so a historical universe resolves to today's
+   survivors and results are biased upward by an unmeasured amount. Recorded on
+   every run rather than hidden; fixing it is phase 6.
 9. **`confidence` is not a probability.** It measures agreement between components and
    feature availability. A signal can be confidently wrong. Calibration is phase 8.
+10. **Research observations share the production table.** `signal_evaluations`
+   holds both, separated by `backtest_run_id` (null = live). One schema means one
+   dataset shape; the isolation is enforced by every production read filtering on
+   null, and asserted in `tests/integration/test_backtest_research.py`. Two tables
+   would have been safer against a forgotten filter and worse for everything else.
 
 ---
 

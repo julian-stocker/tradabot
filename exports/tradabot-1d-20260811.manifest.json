@@ -1,0 +1,139 @@
+{
+  "columns": {
+    "context": [
+      "horizon",
+      "session_phase",
+      "data_quality",
+      "label_timeframe",
+      "label_end_timestamp",
+      "session_date",
+      "qualified",
+      "classification",
+      "direction",
+      "tracked_signal_id",
+      "backtest_run_id",
+      "feature_set_version",
+      "signal_model_version",
+      "scanner_policy_version",
+      "label_policy_version"
+    ],
+    "features": [
+      "score",
+      "confidence",
+      "agreement",
+      "relative_volume",
+      "rsi",
+      "atr_pct",
+      "volatility",
+      "ema_spread_pct",
+      "expected_move_bps",
+      "cost_bps",
+      "net_edge_bps",
+      "spread_bps"
+    ],
+    "identity": [
+      "evaluation_id",
+      "symbol",
+      "sector",
+      "reference_timestamp"
+    ],
+    "labels": [
+      "raw_return",
+      "mfe",
+      "mae",
+      "barrier_outcome",
+      "time_to_target_seconds",
+      "time_to_stop_seconds",
+      "future_price",
+      "future_timestamp",
+      "label_status"
+    ]
+  },
+  "created_at": "2026-08-11T22:54:00.730028+00:00",
+  "dataset_version": "dataset-v1",
+  "date_range": {
+    "first": "2026-07-24 15:00:00+00:00",
+    "last": "2026-08-10 19:00:00+00:00"
+  },
+  "excluded_rows": {
+    "PENDING": 372,
+    "ambiguous_same_bar_retained": 23,
+    "session_AFTER_HOURS": 624
+  },
+  "filters": {
+    "backtest_run_id": null,
+    "complete_only": true,
+    "exclude_unreliable_spread": true,
+    "include_backtest": true,
+    "regular_session_only": true
+  },
+  "horizon": "1d",
+  "row_count": 3120,
+  "symbols": [
+    "AAPL",
+    "ABBV",
+    "ADBE",
+    "AMD",
+    "AMZN",
+    "AVGO",
+    "BA",
+    "BAC",
+    "BRK.B",
+    "CAT",
+    "COP",
+    "COST",
+    "CRM",
+    "CVX",
+    "DIS",
+    "GE",
+    "GOOGL",
+    "GS",
+    "HD",
+    "HON",
+    "INTC",
+    "JNJ",
+    "JPM",
+    "KO",
+    "LLY",
+    "LMT",
+    "MA",
+    "MCD",
+    "META",
+    "MRK",
+    "MS",
+    "MSFT",
+    "MU",
+    "NFLX",
+    "NKE",
+    "NVDA",
+    "ORCL",
+    "PEP",
+    "PFE",
+    "PG",
+    "QCOM",
+    "SBUX",
+    "SLB",
+    "T",
+    "TSLA",
+    "TXN",
+    "UNH",
+    "UPS",
+    "V",
+    "VZ",
+    "WMT",
+    "XOM"
+  ],
+  "versions": {
+    "cost_model": "hist-cost-v1",
+    "feature_set": [
+      "features-v1"
+    ],
+    "label_policy": "labels-v1",
+    "scanner_policy": [
+      "scanner-v1"
+    ],
+    "signal_model": [
+      "signal-v1"
+    ]
+  }
+}

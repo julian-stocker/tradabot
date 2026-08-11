@@ -181,6 +181,17 @@ class SignalEvaluation(Base):
     scan_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True
     )
+    backtest_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        doc="Set only on observations manufactured by a historical replay. "
+        "NULL means the live scanner produced it. This column is the isolation "
+        "boundary of phase 5: research and production share one schema -- so a "
+        "dataset is one shape rather than two -- but every production read "
+        "filters on NULL, so a backtest can never inflate the live candidate "
+        "list, the daily summary or the operations counts while the scheduler "
+        "is running.",
+    )
 
     evaluated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, doc="When the scanner ran."
@@ -268,6 +279,7 @@ class SignalEvaluation(Base):
         Index("ix_signal_evaluations_evaluated_at", "evaluated_at"),
         Index("ix_signal_evaluations_qualified", "qualified"),
         Index("ix_signal_evaluations_tracked", "tracked_signal_id"),
+        Index("ix_signal_evaluations_backtest_run", "backtest_run_id"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debugging aid

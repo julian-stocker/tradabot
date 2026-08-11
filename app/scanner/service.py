@@ -810,7 +810,7 @@ def _build_evaluation(
     signal: Any,
     quote: Quote | None,
     now: datetime,
-    run_id: int,
+    run_id: int | None,
     tracked_id: int | None,
     phase: SessionPhase,
     quality: DataQuality,
@@ -824,6 +824,12 @@ def _build_evaluation(
     **Nothing future-derived goes in here.** Every value is knowable at ``now``:
     the timeframe states, the metrics, the quote, the verdict. Outcome labels are
     phase 5's, in their own table.
+
+    ``run_id`` is nullable because a historical replay produces observations that
+    belong to no scan run -- it marks them with ``backtest_run_id`` instead. The
+    function is shared with :mod:`app.backtesting.engine` on purpose: one
+    assembler means a backtested row and a live row cannot describe the same
+    market state differently.
     """
     context = analysis.context
     primary = context.primary

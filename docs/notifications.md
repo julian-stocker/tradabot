@@ -39,8 +39,8 @@ and turning it all off is constructing a different object.
 Business code publishes **facts**, never commands:
 
 ```python
-await events.publish(Event.paper_trade_closed(symbol="NVDA", payload=...))   # yes
-await send_discord("NVDA closed +4%")                                        # no
+await events.publish(Event.paper_trade_closed(symbol="NVDA", payload=...))  # yes
+await send_discord("NVDA closed +4%")  # no
 ```
 
 ## Configuration
