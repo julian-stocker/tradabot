@@ -16,8 +16,24 @@ from app.market_data.providers.mock import MockMarketDataProvider
 
 ProviderFactory = Callable[[Settings], MarketDataProvider]
 
+
+def _build_alpaca(settings: Settings) -> MarketDataProvider:
+    """Construct the Alpaca provider.
+
+    Imported inside the factory so the SDK is only loaded when Alpaca is actually
+    selected -- `provider=mock` never pays for it, and the module stays importable
+    on a machine with no credentials.
+    """
+    from app.market_data.providers.alpaca import AlpacaMarketDataProvider
+
+    return AlpacaMarketDataProvider(settings.alpaca, settings.market_data)
+
+
 _REGISTRY: dict[str, ProviderFactory] = {
+    # The mock provider is permanent. Deterministic tests depend on it, and it is
+    # the only provider that works with no credentials and no network.
     "mock": lambda settings: MockMarketDataProvider(seed=settings.mock_seed),
+    "alpaca": _build_alpaca,
 }
 
 

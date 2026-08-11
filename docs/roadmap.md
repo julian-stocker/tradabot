@@ -100,12 +100,12 @@ All three €50 portfolios decline it — at the *decision* stage, because a €
 is 415 bps of a €50 round trip and destroys the expected edge.
 
 **Deliberate limitations:** long-only, market orders only, no partial fills, no
-liquidity model, `max_daily_loss` stored but not enforced. Each is refused
-explicitly rather than approximated.
+liquidity model. Each is refused explicitly rather than approximated.
+(`max_daily_loss` was stored but unenforced here; phase 3b enforced it.)
 
 ---
 
-## Phase 3b — Real market-data provider integration
+## Phase 3b — Real market-data provider integration ✅
 
 **Entry:** phase 3 complete. Was "phase 2b"; renumbered because the paper engine
 landed first.
@@ -126,13 +126,58 @@ measure nothing.
 - Data-quality checks: gap detection, duplicate bars, impossible prices, stale quotes
 - Announcement dates on corporate actions, replacing the effective-date proxy
 
-**Exit**
-- Two providers coexist and are switchable by configuration alone
-- A documented reconciliation showing adjusted prices match an independent source
-- The paper engine runs on real data with no code change
+**Delivered:** Alpaca (`alpaca-py`, market data only) behind the existing
+protocol; `exchange-calendars` sessions/holidays/half-days; calendar-aware gap
+detection; bounded retry with jittered backoff and `Retry-After`; provenance on
+every stored bar; split adjustment for *open positions*; session-based
+`max_daily_loss` and trading-day holding periods; a credential-free health
+endpoint; CLI import/sync/quote/status and a real-data replay command.
 
-**Risk:** corporate-action *coverage* and exchange calendars are unglamorous and
-consume more time than expected.
+Two providers coexist and are switchable by configuration alone. The paper engine
+runs on real data with **no change to phase 3 code** — `simulate` composes the
+existing engine over stored candles.
+
+**Not delivered, and deferred deliberately:**
+- Reconciliation of adjusted prices against an independent source. It needs a
+  second data vendor, which is phase 6's problem, not a checkbox this phase can
+  honestly tick.
+- `listed_at` / `delisted_at` backfill. Alpaca's asset catalogue is behind the
+  *trading* API, and requesting a trading credential for a market-data tool asks
+  for more access than the job needs.
+- Announcement dates on corporate actions. The provider does not supply them, so
+  the effective-date proxy stands and remains documented as conservative.
+
+**The distinction this phase turns on:** real data proves **ingestion
+correctness**, not **predictive edge**. Nothing here makes a backtest valid; it
+makes one possible.
+
+---
+
+## Phase 3.5 — Discord notification infrastructure
+
+**Entry:** phase 3b. Recommended next, and small.
+
+The event boundary already exists: `app/core/events.py` defines the event types,
+the `EventPublisher` protocol and a null implementation, and ingestion already
+emits through it. Nothing delivers anything yet.
+
+**Scope**
+- A Discord transport implementing `EventPublisher`, attached at the composition
+  root — not called from inside provider code
+- Delivery failure is swallowed and logged, never propagated: a Discord outage
+  must not fail a market-data sync
+- Rate limiting and coalescing, so one bad night does not produce 400 messages
+- Webhook URL from the environment, treated as a credential
+
+**Exit**
+- A failed sync produces one legible message
+- Turning the transport off is configuration, not code
+- No provider module imports anything Discord-shaped
+
+**Why before the scanner:** a scanner that runs unattended needs somewhere to
+report, and the alternative — discovering failures by reading logs the next
+morning — makes every later phase slower to debug. It is also the cheapest phase
+on this list, because the seam it plugs into was built in 3b.
 
 ---
 

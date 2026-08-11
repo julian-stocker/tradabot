@@ -4,7 +4,9 @@
 # ---------------------------------------------------------------------------
 .DEFAULT_GOAL := help
 .PHONY: help install dev test test-cov lint format format-check typecheck check \
-        migrate migration downgrade seed seed-profiles demo-simulation signal up down logs clean
+        migrate migration downgrade seed seed-profiles demo-simulation signal \
+        market-data-status market-data-import market-data-sync quote simulate \
+        smoke-real-data up down logs clean
 
 PYTHON ?= python3.12
 VENV   := .venv
@@ -67,6 +69,29 @@ demo-simulation: ## Run the deterministic multi-profile paper-trading demo
 signal: ## Print a signal: make signal s=NVDA
 	@test -n "$(s)" || (echo "usage: make signal s=NVDA" && exit 1)
 	$(BIN)/python -m app.cli signal $(s)
+
+market-data-status: ## Show provider configuration and stored-data freshness
+	$(BIN)/python -m app.cli market-data status
+
+market-data-import: ## Import a window: make market-data-import s=NVDA from=2024-01-01 to=2024-06-30 [tf=1d]
+	@test -n "$(s)" -a -n "$(from)" -a -n "$(to)" || \
+		(echo "usage: make market-data-import s=NVDA from=2024-01-01 to=2024-06-30 [tf=1d]" && exit 1)
+	$(BIN)/python -m app.cli market-data import $(s) --start $(from) --end $(to) --timeframe $(or $(tf),1d)
+
+market-data-sync: ## Update the watchlist (or make market-data-sync s=NVDA)
+	$(BIN)/python -m app.cli market-data sync $(s)
+
+quote: ## Fetch one latest quote: make quote s=NVDA
+	@test -n "$(s)" || (echo "usage: make quote s=NVDA" && exit 1)
+	$(BIN)/python -m app.cli market-data quote $(s)
+
+simulate: ## Replay imported real candles: make simulate s=NVDA from=2024-01-01 to=2024-06-30
+	@test -n "$(s)" -a -n "$(from)" -a -n "$(to)" || \
+		(echo "usage: make simulate s=NVDA from=2024-01-01 to=2024-06-30" && exit 1)
+	$(BIN)/python -m app.cli simulate --symbol $(s) --from $(from) --to $(to)
+
+smoke-real-data: ## Opt-in smoke test against the live provider (needs credentials)
+	TRADABOT_RUN_EXTERNAL_TESTS=1 $(BIN)/pytest tests/external -v
 
 up: ## Start the Docker stack
 	docker compose up --build -d

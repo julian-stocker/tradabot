@@ -28,8 +28,11 @@ transaction costs that decide whether an edge survives contact with a broker.
 - **Not financial advice.** The baseline scoring weights are *heuristics chosen for
   legibility*, with zero statistical validation. They exist to be falsified by the
   backtesting engine in phase 4.
-- **Not backed by real data yet.** Phase 1 ships a deterministic synthetic data
-  provider. Any "result" produced today is a result about a random number generator.
+- **Not validated on real data.** Real US equity data now flows through the whole
+  pipeline, which proves the *ingestion* is correct. It proves nothing about
+  predictive edge: no backtester, no significance testing, no out-of-sample
+  discipline exists yet. A profitable-looking simulation today is a statement
+  about the plumbing.
 
 ---
 
@@ -133,6 +136,12 @@ make dev              # start the API with autoreload
 | `make seed` | Ingest deterministic synthetic data (instruments, actions, candles) |
 | `make seed-profiles` | Install the default simulation-profile catalogue |
 | `make demo-simulation` | Run the deterministic multi-profile paper-trading demo |
+| `make market-data-status` | Provider configuration and stored-data freshness |
+| `make market-data-import s=NVDA from=... to=...` | Import a real historical window |
+| `make market-data-sync [s=NVDA]` | Update the watchlist from its newest stored bar |
+| `make quote s=NVDA` | Fetch one latest quote |
+| `make simulate s=NVDA from=... to=...` | Replay imported real candles through the paper broker |
+| `make smoke-real-data` | Opt-in live-provider smoke test (needs credentials) |
 | `make up` / `make down` | Start / stop the Docker stack |
 | `make clean` | Remove caches and build artefacts |
 
@@ -203,6 +212,7 @@ All under the `/api/v1` prefix. Interactive docs at `/docs`, schema at
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness + database connectivity |
+| `GET` | `/health/market-data` | Provider configuration and data freshness (credential-free) |
 | `GET` | `/api/v1/instruments` | List instruments (filter by exchange, asset type) |
 | `GET` | `/api/v1/instruments/{symbol}` | Instrument detail |
 | `GET` | `/api/v1/instruments/{symbol}/candles` | OHLCV in a time window |
@@ -231,13 +241,17 @@ The feature and signal endpoints take an `adjustment` parameter
 
 These are known and deliberate, not oversights:
 
-1. **Synthetic data only.** `MockMarketDataProvider` generates seeded geometric
-   Brownian motion. It has no earnings, gaps, halts, or real microstructure.
+1. **Real data is ingested but unvalidated as a strategy.** Alpaca provides real
+   US equity bars, quotes and corporate actions. That proves *ingestion
+   correctness*, not *predictive edge* — see [docs/market-data.md](docs/market-data.md).
+   `MockMarketDataProvider` remains and remains mandatory: every test depends on
+   it, and it keeps the suite offline and deterministic.
 2. **Corporate actions cover splits and dividends only.** Spin-offs, mergers and
    symbol changes can be *recorded* but are not adjusted for. See
    [docs/data-adjustments.md](docs/data-adjustments.md).
-3. **No exchange calendar.** Sessions and holidays are approximated. `Timeframe.duration`
-   is nominal wall-clock time.
+3. **Free-tier data is one venue.** The default Alpaca feed is IEX, roughly 2-3%
+   of consolidated volume. Volume-based signal components computed on it measure
+   IEX, not the market. See [docs/providers/alpaca.md](docs/providers/alpaca.md).
 4. **Signal weights are arbitrary.** They are legible guesses, marked as such
    everywhere they appear. Do not read meaning into a score of 42.
 5. **No backtester.** Only the data structures and protocols exist. Any claim about
@@ -249,10 +263,12 @@ These are known and deliberate, not oversights:
    daily-bar signals are computed today.
 9. **Paper trading is long-only, market-orders-only.** Shorts and limit orders are
    refused rather than approximated. No partial fills, no liquidity model.
-   `max_daily_loss` is stored but not yet enforced.
-10. **Lifecycle, not index membership.** The universe answers "was this listed?",
+10. **Historical spreads are assumed, not measured.** Bars carry no quote, so a
+    replay applies the configured spread symmetrically. A real spread widens
+    exactly when it matters most, and this one does not.
+11. **Lifecycle, not index membership.** The universe answers "was this listed?",
     not "was this in the DAX in 2019?".
-11. **No backtester.** The paper engine runs forward through bars; it is not a
+12. **No backtester.** The paper engine runs forward through bars; it is not a
     historical strategy evaluator with walk-forward validation.
 
 ---
@@ -263,12 +279,12 @@ These are known and deliberate, not oversights:
 |---|---|---|
 | 1 | Foundation and deterministic market analysis | ✅ complete |
 | 2 | Data integrity + simulation domain | ✅ complete |
-| 3 | Multi-profile paper-trading engine | ✅ this release |
-| 3b | Real market-data provider integration | planned |
-| 3 | Market scanner | planned |
-| 4 | Backtesting engine | planned |
-| 5 | Spread and execution-cost calibration | planned |
-| 6 | Paper trading | planned |
+| 3 | Multi-profile paper-trading engine | ✅ complete |
+| 3b | Real market-data provider integration | ✅ this release |
+| 3.5 | Discord notification infrastructure | planned |
+| 4 | Market scanner | planned |
+| 5 | Backtesting engine | planned |
+| 6 | Spread and execution-cost calibration | planned |
 | 7 | Machine-learning baseline | planned |
 | 8 | Walk-forward ML evaluation | planned |
 | 9 | Web dashboard | planned |
@@ -281,6 +297,9 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — module boundaries, data flow, key decisions
+- [docs/market-data.md](docs/market-data.md) — real data ingestion, calendars, quotes, scheduling
+- [docs/providers/alpaca.md](docs/providers/alpaca.md) — the Alpaca integration, feeds, retries, credentials
+- [docs/data-quality.md](docs/data-quality.md) — validation rules, gaps, and why nothing is repaired
 - [docs/data-adjustments.md](docs/data-adjustments.md) — corporate actions, raw vs adjusted prices
 - [docs/simulation-design.md](docs/simulation-design.md) — multi-profile simulation and feedback
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, CheckConstraint, Enum, ForeignKey, Index
+from sqlalchemy import BigInteger, CheckConstraint, Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -70,6 +70,20 @@ class Candle(Base):
         Money(PRICE_PRECISION, PRICE_SCALE),
         nullable=True,
         doc="Volume-weighted average price, when the provider reports it.",
+    )
+
+    provider: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        doc=(
+            "Which provider supplied this bar. Per-bar rather than per-instrument "
+            "because a backfill and an incremental sync can come from different "
+            "sources, and 'where did this number come from' must stay answerable "
+            "for the individual bar."
+        ),
+    )
+    ingested_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), nullable=True, doc="When tradabot stored this bar."
     )
 
     __table_args__ = (

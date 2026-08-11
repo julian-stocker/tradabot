@@ -96,6 +96,20 @@ class Instrument(Base, TimestampMixin):
         ),
     )
 
+    provider: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        doc="Provider that supplied this instrument's metadata (mock, alpaca, ...).",
+    )
+    provider_symbol: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        doc=(
+            "The provider's own ticker, when it differs from ours. Kept on the "
+            "instrument rather than on every candle: one row, not millions."
+        ),
+    )
+
     __table_args__ = (
         CheckConstraint("length(currency) = 3", name="currency_iso4217"),
         CheckConstraint("symbol = upper(symbol)", name="symbol_uppercase"),

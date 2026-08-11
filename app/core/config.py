@@ -19,7 +19,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
@@ -74,6 +74,94 @@ class CostSettings(BaseModel):
         ge=0,
         description="Smallest order the broker accepts; 0 disables the check.",
     )
+
+
+class AlpacaSettings(BaseModel):
+    """Alpaca market-data credentials and feed selection.
+
+    Credentials are :class:`~pydantic.SecretStr`, so they render as ``**********``
+    in reprs, logs, tracebacks and ``model_dump()`` output. Getting at the real
+    value requires an explicit ``.get_secret_value()`` call, which is greppable --
+    an accidental leak becomes a visible line of code rather than a silent one.
+
+    tradabot uses Alpaca for **market data only**. No trading endpoint is
+    configured, and no order-placing credential is ever requested.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_key: SecretStr = Field(default=SecretStr(""), description="ALPACA_API_KEY.")
+    api_secret: SecretStr = Field(default=SecretStr(""), description="ALPACA_API_SECRET.")
+
+    feed: Literal["iex", "sip", "delayed_sip"] = Field(
+        default="iex",
+        description=(
+            "Data feed. 'iex' is free but covers only IEX volume -- roughly 2-3% "
+            "of consolidated tape, so its bars and spreads are NOT the whole "
+            "market. 'sip' is the consolidated tape and requires a paid "
+            "subscription. Which one produced a bar matters, so it is recorded."
+        ),
+    )
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+    max_retries: int = Field(
+        default=4,
+        ge=0,
+        le=10,
+        description="Bounded. An unbounded retry loop turns an outage into a hang.",
+    )
+    backoff_base_seconds: float = Field(default=0.5, gt=0)
+    backoff_max_seconds: float = Field(default=30.0, gt=0)
+    max_bars_per_request: int = Field(default=10_000, ge=1, le=10_000)
+
+    @property
+    def is_configured(self) -> bool:
+        """Whether both credentials are present.
+
+        Checked before constructing a client so a missing key produces a clear
+        configuration error rather than an opaque 401 from the provider.
+        """
+        return bool(self.api_key.get_secret_value()) and bool(self.api_secret.get_secret_value())
+
+
+class MarketDataSettings(BaseModel):
+    """Provider-independent market-data behaviour."""
+
+    model_config = ConfigDict(frozen=True)
+
+    watchlist: tuple[str, ...] = Field(
+        default=("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA"),
+        description=(
+            "Symbols to synchronise. **Development examples, not investment "
+            "recommendations.** Configuration, not strategy: nothing in the engine "
+            "reads this list to decide anything."
+        ),
+    )
+    default_exchange: str = Field(
+        default="XNAS", description="Exchange MIC assumed when a provider omits one."
+    )
+    max_quote_age_seconds: int = Field(
+        default=900,
+        ge=0,
+        description="Above this a quote is reported stale by the health endpoint.",
+    )
+    treat_provider_quote_as_executable: bool = Field(
+        default=True,
+        description=(
+            "Whether a provider quote may stand in for a broker's executable "
+            "quote in the paper broker. Market data from a consolidated tape is "
+            "NOT the price a retail broker would fill you at -- see "
+            "docs/market-data.md. True is the best available approximation, and "
+            "it is a stated assumption rather than a hidden equivalence."
+        ),
+    )
+
+    @field_validator("watchlist", mode="before")
+    @classmethod
+    def _parse_watchlist(cls, value: object) -> object:
+        """Accept a comma-separated string from the environment."""
+        if isinstance(value, str):
+            return tuple(s.strip().upper() for s in value.split(",") if s.strip())
+        return value
 
 
 class SignalWeights(BaseModel):
@@ -189,8 +277,13 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
 
     # --- Market data ------------------------------------------------------
-    market_data_provider: str = "mock"
+    market_data_provider: str = Field(
+        default="mock",
+        description="'mock' or 'alpaca'. The mock provider is never removed.",
+    )
     mock_seed: int = 1337
+    alpaca: AlpacaSettings = Field(default_factory=AlpacaSettings)
+    market_data: MarketDataSettings = Field(default_factory=MarketDataSettings)
 
     # --- Domain assumptions ----------------------------------------------
     costs: CostSettings = Field(default_factory=CostSettings)

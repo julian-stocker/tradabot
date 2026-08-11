@@ -24,6 +24,8 @@ _UPSERT_COLUMNS = (
     "is_active",
     "listed_at",
     "delisted_at",
+    "provider",
+    "provider_symbol",
 )
 
 
@@ -75,8 +77,14 @@ class InstrumentRepository:
             stmt = stmt.where(Instrument.is_active.is_(True))
         return len((await self._session.execute(stmt)).scalars().all())
 
-    async def upsert_many(self, infos: Sequence[InstrumentInfo]) -> int:
-        """Insert or update instruments by symbol. Returns the number processed."""
+    async def upsert_many(
+        self, infos: Sequence[InstrumentInfo], *, provider: str | None = None
+    ) -> int:
+        """Insert or update instruments by symbol. Returns the number processed.
+
+        ``provider`` records which source described the instrument, so a later
+        question about a suspicious listing date has an answer.
+        """
         if not infos:
             return 0
 
@@ -91,6 +99,8 @@ class InstrumentRepository:
                 "is_active": info.is_active,
                 "listed_at": info.listed_at,
                 "delisted_at": info.delisted_at,
+                "provider": provider,
+                "provider_symbol": info.symbol.upper() if provider else None,
             }
             for info in infos
         ]

@@ -24,13 +24,14 @@ Five tables:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     Enum,
     Float,
     ForeignKey,
@@ -133,6 +134,22 @@ class VirtualPortfolio(Base, TimestampMixin):
         doc="Bars this portfolio has seen. Drives bar-counted holding periods.",
     )
     last_valued_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    session_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        doc=(
+            "Trading session the daily-loss limit is currently measured against. "
+            "A session, not a UTC calendar day: a 21:00 UTC fill on a US venue "
+            "belongs to that day's session, and resetting at UTC midnight would "
+            "split one trading day in two."
+        ),
+    )
+    session_start_equity: Mapped[Decimal | None] = mapped_column(
+        Money(MONEY_PRECISION, MONEY_SCALE),
+        nullable=True,
+        doc="Equity at the start of `session_date`; the daily-loss denominator.",
+    )
     halted_reason: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
@@ -330,6 +347,15 @@ class VirtualPosition(Base, TimestampMixin):
         BigInteger,
         nullable=True,
         doc="Bar index at which a time exit triggers. Bars, not calendar days.",
+    )
+    corporate_actions_applied_through: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        doc=(
+            "Splits effective at or before this instant have already been applied "
+            "to this position. Makes adjustment idempotent: re-importing a "
+            "provider's action history must not halve a holding twice."
+        ),
     )
 
     highest_price_seen: Mapped[Decimal | None] = mapped_column(

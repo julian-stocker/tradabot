@@ -162,7 +162,19 @@ typing makes test doubles trivial. Streaming is a *separate* protocol
 method they cannot support.
 
 Adding a real provider means writing one adapter and one line in
-`app/market_data/registry.py`. Nothing else changes.
+`app/market_data/registry.py`. Nothing else changes — which phase 3b confirmed:
+`app/market_data/providers/alpaca.py` is the only module in the codebase that
+knows Alpaca exists, and it was added without touching a single downstream
+consumer.
+
+Two constraints on that adapter turned out to matter, and are documented in
+[providers/alpaca.md](providers/alpaca.md):
+
+* The SDK is **synchronous**, so every call runs on a worker thread via
+  `asyncio.to_thread`. Wrapping a blocking client in `async def` without moving
+  it off the loop stalls every other request in the process.
+* SDK imports are **lazy**, so the module is importable — and the API starts —
+  with no credentials and no SDK installed.
 
 ### 6. TimescaleDB, optional by design
 
@@ -235,7 +247,20 @@ convention.
 Nine portfolios across three risk appetites store three risk rows, not nine.
 See [simulation-design.md](simulation-design.md).
 
-### 13. UTC everywhere, enforced at the type level
+### 13. The exchange calendar is provider-independent
+
+`app/market_data/calendars.py` wraps `exchange-calendars` and sits beside the
+providers rather than inside one. Which days a venue trades is a fact about the
+venue, not about who sells you the data, and two providers disagreeing about a
+holiday would be a bug rather than a configuration choice.
+
+It is also the module that lets three separate things stop guessing: gap
+detection (a weekend is not missing data), holding periods (five *trading* days),
+and the daily-loss budget (a *session*, not a UTC day). pandas is contained
+inside the wrapper -- `session_containing` returns a plain `date`, so the
+dependency does not leak into the domain.
+
+### 14. UTC everywhere, enforced at the type level
 
 `ensure_utc` **rejects naive datetimes** rather than assuming UTC. Guessing is how
 off-by-one-session bugs get into backtests. The `UTCDateTime` column type normalises
@@ -284,15 +309,16 @@ Each is a deliberate phase 1 trade-off, not an oversight.
    `known_as_of` is therefore conservative.
 3. **Universe is lifecycle, not index membership.** It answers "was this listed?",
    not "was this in the index?".
-4. **`max_daily_loss` is stored but not enforced.** It needs a session boundary,
-   which arrives with the exchange calendar. Every other risk limit is enforced.
-   Paper trading is long-only and market-orders-only; both are refused rather than
-   approximated.
+4. **Paper trading is long-only and market-orders-only.** Shorts and limit orders
+   are refused rather than approximated. (`max_daily_loss` is now enforced, per
+   trading session -- phase 3b.)
 5. **`symbol` is globally unique.** Real multi-venue listings (VOD on LSE vs. Xetra)
    need a `(symbol, exchange)` key. Mechanical migration later; guessing a venue today
    would not be.
-6. **No exchange calendar.** `Timeframe.duration` is nominal wall-clock time; the mock
-   provider approximates a US session and ignores DST and holidays.
+6. **Historical spreads are assumed, not stored.** Bars carry no quote, so a
+   replay applies the configured spread symmetrically around each price. It is
+   consistent between scoring and execution, and it is still an assumption: a real
+   spread widens exactly when it matters most. Storing historical quotes is phase 6.
 7. **Regime is instrument-local.** A real regime signal needs market-wide inputs (index
    trend, breadth, a volatility index). Named honestly rather than overstated.
 8. **Historical signals use the configured default spread.** Today's spread was not
@@ -314,3 +340,19 @@ machine. Adding auth is a phase 9 concern, alongside the web dashboard.
 
 Secrets come from the environment only. `docker-compose.yml` uses `${VAR:?err}` so
 compose fails loudly rather than starting with a blank password.
+
+Provider credentials (phase 3b) follow the same rule, with four properties held
+deliberately:
+
+* held as `SecretStr`, so they never appear in a repr, a `model_dump()` or a log;
+* never interpolated into an exception message;
+* never returned by an endpoint -- `/health/market-data` reports *whether* a
+  provider is configured, never what with, and carries no key prefix or length
+  from which one could be confirmed;
+* `.env.example` carries empty placeholders only.
+
+`app/core/redaction.py` masks credential-shaped text at every outward boundary
+(log line, event payload, HTTP response). That is **defence in depth against a
+third-party SDK echoing request context into its own error strings** -- not the
+primary control, which is not putting secrets in strings at all. It is
+pattern-based and therefore incomplete.

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.core.time import ensure_utc
+from app.core.time import ensure_utc, utc_now
 from app.db.models import Candle
 from app.db.upsert import build_upsert, table_of
 from app.domain.enums import Timeframe
@@ -17,7 +17,17 @@ from app.market_data.provider import CandleData
 
 logger = get_logger(__name__)
 
-_UPSERT_COLUMNS = ("open", "high", "low", "close", "volume", "trade_count", "vwap")
+_UPSERT_COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trade_count",
+    "vwap",
+    "provider",
+    "ingested_at",
+)
 
 MAX_CANDLE_LIMIT = 50_000
 """Hard ceiling on rows returned in one call. Prevents an unbounded API query
@@ -119,11 +129,20 @@ class CandleRepository:
         instrument_id: int,
         timeframe: Timeframe,
         candles: Sequence[CandleData],
+        provider: str | None = None,
+        ingested_at: datetime | None = None,
     ) -> int:
-        """Insert or replace candles. Idempotent on the natural key."""
+        """Insert or replace candles. Idempotent on the natural key.
+
+        ``provider`` and ``ingested_at`` record where each bar came from. Written
+        per bar rather than per instrument because a backfill and a later
+        incremental sync can come from different sources, and "where did this
+        number come from" must stay answerable for the individual bar.
+        """
         if not candles:
             return 0
 
+        stamped_at = ingested_at or utc_now()
         rows = [
             {
                 "instrument_id": instrument_id,
@@ -136,6 +155,8 @@ class CandleRepository:
                 "volume": candle.volume,
                 "trade_count": candle.trade_count,
                 "vwap": candle.vwap,
+                "provider": provider,
+                "ingested_at": stamped_at,
             }
             for candle in candles
         ]

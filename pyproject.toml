@@ -23,6 +23,12 @@ dependencies = [
     "numpy>=2.1",
     "structlog>=24.4",
     "python-dotenv>=1.0",
+    # Official Alpaca SDK. `alpaca-trade-api` is deprecated and archived --
+    # see docs/providers/alpaca.md.
+    "alpaca-py>=0.44",
+    # Exchange sessions and holidays. Hardcoding market holidays is a
+    # maintenance trap that fails silently once a year.
+    "exchange-calendars>=4.13",
 ]
 
 [project.optional-dependencies]
@@ -87,6 +93,12 @@ ignore = [
 "app/db/types.py" = ["ARG002"]
 "migrations/**" = ["ANN", "ARG", "N", "E501"]
 "app/cli.py" = ["T20"]
+# The Alpaca SDK is imported lazily inside methods on purpose: the module must
+# stay importable with the SDK absent and no credentials configured, so that
+# `provider=mock` never pays for it and the registry can list Alpaca without
+# constructing it.
+"app/market_data/providers/alpaca.py" = ["PLC0415"]
+"app/market_data/registry.py" = ["PLC0415"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
@@ -115,6 +127,13 @@ disallow_untyped_decorators = false
 module = ["polars.*"]
 ignore_missing_imports = true
 
+# Third-party packages that ship no type information. Listed explicitly rather
+# than silencing missing imports globally, so a genuinely missing dependency
+# still fails the type check.
+[[tool.mypy.overrides]]
+module = ["exchange_calendars.*", "pandas.*", "alpaca.*"]
+ignore_missing_imports = true
+
 # --------------------------------------------------------------------------
 # pytest
 # --------------------------------------------------------------------------
@@ -124,9 +143,17 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-q --strict-markers --strict-config"
-filterwarnings = ["error", "ignore::DeprecationWarning:asyncpg.*"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:asyncpg.*",
+    # alpaca-py imports `websockets.legacy` on any `alpaca.data` import. The
+    # deprecation is theirs to fix, and it is not worth losing `-W error` -- which
+    # catches our own -- over a transitive import we never call.
+    "ignore::DeprecationWarning:websockets.*",
+]
 markers = [
     "integration: tests that touch a real database",
+    "external: tests that hit a live provider over the network; skipped unless TRADABOT_RUN_EXTERNAL_TESTS=1",
 ]
 
 [tool.coverage.run]

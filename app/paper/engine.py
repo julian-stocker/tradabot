@@ -40,6 +40,7 @@ from app.domain.enums import (
     TradeOutcome,
 )
 from app.domain.quotes import Quote
+from app.market_data.calendars import TradingCalendar, get_trading_calendar
 from app.paper.broker import OrderRequest, PaperBroker
 from app.paper.execution import liquidation_value
 from app.paper.exits import (
@@ -50,12 +51,21 @@ from app.paper.exits import (
 )
 from app.paper.portfolio import PortfolioValuation, record_valuation, value_portfolio
 from app.paper.repository import PaperTradingRepository
+from app.paper.sessions import (
+    SessionState,
+    daily_loss_breached,
+    holding_deadline,
+    holding_period_expired_at,
+    resolve_session,
+)
 from app.paper.sizing import size_position
 from app.simulation.models import SimulationProfileConfig
 
 logger = get_logger(__name__)
 
 ZERO = Decimal(0)
+_DAILY_LOSS_HALT = "max_daily_loss breached for this trading session"
+
 BREAKEVEN_EPSILON = Decimal("0.005")
 """Net P&L within half a cent of zero counts as a breakeven rather than a
 microscopic win or loss. Without it, outcome statistics are dominated by rounding."""
@@ -113,11 +123,15 @@ class PaperTradingEngine:
         portfolio: VirtualPortfolio,
         *,
         ambiguity_policy: CandleAmbiguityPolicy = CandleAmbiguityPolicy.CONSERVATIVE,
+        calendar: TradingCalendar | None = None,
     ) -> None:
         self._repository = repository
         self._profile = profile
         self._portfolio = portfolio
         self._policy = ambiguity_policy
+        # Defaults to NYSE hours. A caller with an instrument in hand should pass
+        # that venue's calendar; the default is documented rather than silent.
+        self._calendar = calendar or get_trading_calendar("XNYS")
         self._broker = PaperBroker(repository.session, profile, portfolio)
 
     @property
@@ -347,10 +361,7 @@ class PaperTradingEngine:
             )
             return True
 
-        bars_held = self._portfolio.bars_processed - position.entry_bar_index
-        if holding_period_expired(
-            bars_held=bars_held, max_holding_bars=self._profile.risk.max_holding_bars
-        ):
+        if self._holding_period_over(position, bar):
             # Time exits fill at the bar's close: the first price available once
             # the holding period is known to have elapsed.
             await self._close(
@@ -363,6 +374,39 @@ class PaperTradingEngine:
             return True
 
         return False
+
+    def _holding_period_over(self, position: VirtualPosition, bar: BarPrices) -> bool:
+        """Whether ``position`` has been held long enough to be closed on time.
+
+        Two rules, and the earlier one wins:
+
+        **Bars held** is exact for a contiguous replay and is the only meaningful
+        rule intraday, where "a day" is not the unit anyone means.
+
+        **Calendar deadline** covers what the counter cannot. The counter only
+        advances on bars the engine actually sees, so a halted instrument, a data
+        gap or a symbol that simply did not trade freezes it -- and a position with
+        a 10-bar limit can sit open for months while its counter reads 3. Counting
+        sessions from the entry timestamp instead makes the limit a fact about the
+        market rather than about how much data happened to arrive, and it skips
+        weekends and holidays, which is what "10 trading days" always meant.
+
+        Taking whichever fires first is deliberate: a holding limit is a risk
+        control, and the failure worth avoiding is a position outliving it.
+        """
+        risk = self._profile.risk
+        bars_held = self._portfolio.bars_processed - position.entry_bar_index
+        if holding_period_expired(bars_held=bars_held, max_holding_bars=risk.max_holding_bars):
+            return True
+
+        deadline = holding_deadline(
+            calendar=self._calendar,
+            entry=position.entry_timestamp,
+            max_holding_days=risk.max_holding_bars,
+        )
+        return holding_period_expired_at(
+            deadline=deadline, moment=bar.timestamp, calendar=self._calendar
+        )
 
     async def close_position(
         self,
@@ -432,24 +476,74 @@ class PaperTradingEngine:
         )
 
     def _apply_risk_halt(self, valuation: PortfolioValuation) -> None:
-        """Halt the portfolio if drawdown breached its limit.
+        """Halt the portfolio if a drawdown or daily-loss limit was breached.
 
-        Halting is sticky and recorded on the portfolio, so a recovering equity
-        curve does not quietly resume trading. Clearing it is a deliberate act,
-        not something the engine does on its own.
+        Both halts are sticky and recorded on the portfolio, so a recovering
+        equity curve does not quietly resume trading. Clearing a halt is a
+        deliberate act.
+
+        The daily-loss halt is the exception: it clears **by itself at the next
+        trading session**, because that is what "daily" means. Everything else
+        stays halted until someone looks at it.
         """
+        session = self._roll_session(valuation)
+
+        if session.is_new_session and self._portfolio.halted_reason == _DAILY_LOSS_HALT:
+            # A new session resets the daily budget, and with it this halt only.
+            self._portfolio.halted_reason = None
+            logger.info(
+                "daily-loss halt cleared at new session",
+                profile=self._profile.name,
+                session=str(session.session_date),
+            )
+
         if self._portfolio.halted_reason is not None:
             return
-        limit = self._profile.risk.max_drawdown
-        if valuation.drawdown < -float(limit):
+
+        drawdown_limit = self._profile.risk.max_drawdown
+        if valuation.drawdown < -float(drawdown_limit):
             self._portfolio.halted_reason = (
-                f"max_drawdown breached: {valuation.drawdown:.4f} < -{float(limit)}"
+                f"max_drawdown breached: {valuation.drawdown:.4f} < -{float(drawdown_limit)}"
             )
             logger.warning(
                 "portfolio halted",
                 profile=self._profile.name,
                 drawdown=str(valuation.drawdown),
             )
+            return
+
+        if daily_loss_breached(
+            equity=valuation.equity,
+            session_start_equity=session.start_equity,
+            max_daily_loss=self._profile.risk.max_daily_loss,
+        ):
+            self._portfolio.halted_reason = _DAILY_LOSS_HALT
+            logger.warning(
+                "portfolio halted for the session",
+                profile=self._profile.name,
+                session=str(session.session_date),
+                session_start_equity=str(session.start_equity),
+                equity=str(valuation.equity),
+            )
+
+    def _roll_session(self, valuation: PortfolioValuation) -> SessionState:
+        """Advance the portfolio's trading session and persist the new baseline.
+
+        The daily-loss budget is measured against the *session's* opening equity,
+        not a UTC calendar day. A US session runs past 20:00 UTC, so a
+        midnight-UTC reset would split one trading day across two budgets.
+        """
+        session = resolve_session(
+            calendar=self._calendar,
+            moment=valuation.timestamp,
+            current_session=self._portfolio.session_date,
+            current_start_equity=self._portfolio.session_start_equity,
+            equity=valuation.equity,
+        )
+        if session.is_new_session:
+            self._portfolio.session_date = session.session_date
+            self._portfolio.session_start_equity = session.start_equity
+        return session
 
 
 def _mark(position: VirtualPosition, bar: BarPrices, quote: Quote | None) -> None:
