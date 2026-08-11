@@ -107,6 +107,10 @@ class BarOutcome:
     positions_marked: int
     positions_closed: int
     valuation: PortfolioValuation
+    closed_trades: tuple[VirtualTrade, ...] = ()
+    """The trades this bar closed. Carried out rather than merely counted, so a
+    caller can notify per portfolio without re-querying and guessing which rows
+    are new."""
 
 
 class PaperTradingEngine:
@@ -314,11 +318,12 @@ class PaperTradingEngine:
         if advance_clock:
             self._portfolio.bars_processed += 1
 
-        closed = 0
+        closed_trades: list[VirtualTrade] = []
         for position in positions:
             _update_excursions(position, bar)
-            if await self._maybe_exit(position, bar, quote):
-                closed += 1
+            trade = await self._maybe_exit(position, bar, quote)
+            if trade is not None:
+                closed_trades.append(trade)
             else:
                 _mark(position, bar, quote)
 
@@ -333,14 +338,19 @@ class PaperTradingEngine:
         return BarOutcome(
             profile_name=self._profile.name,
             positions_marked=len(positions),
-            positions_closed=closed,
+            positions_closed=len(closed_trades),
             valuation=valuation,
+            closed_trades=tuple(closed_trades),
         )
 
     async def _maybe_exit(
         self, position: VirtualPosition, bar: BarPrices, quote: Quote | None
-    ) -> bool:
-        """Close ``position`` if this bar triggered an exit. Returns whether it did."""
+    ) -> VirtualTrade | None:
+        """Close ``position`` if this bar triggered an exit.
+
+        Returns the resulting trade, or None if the position stays open. The
+        trade rather than a boolean because the caller needs it to notify.
+        """
         evaluation = evaluate_exit(
             side=position.side,
             bar=bar,
@@ -350,7 +360,7 @@ class PaperTradingEngine:
         )
 
         if evaluation.triggered and evaluation.exit_price is not None:
-            await self._close(
+            return await self._close(
                 position,
                 exit_price=evaluation.exit_price,
                 timestamp=bar.timestamp,
@@ -359,21 +369,19 @@ class PaperTradingEngine:
                 gapped=evaluation.gapped,
                 ambiguous=evaluation.ambiguous,
             )
-            return True
 
         if self._holding_period_over(position, bar):
             # Time exits fill at the bar's close: the first price available once
             # the holding period is known to have elapsed.
-            await self._close(
+            return await self._close(
                 position,
                 exit_price=bar.close,
                 timestamp=bar.timestamp,
                 reason=ExitReason.MAX_HOLDING_PERIOD,
                 quote=quote,
             )
-            return True
 
-        return False
+        return None
 
     def _holding_period_over(self, position: VirtualPosition, bar: BarPrices) -> bool:
         """Whether ``position`` has been held long enough to be closed on time.

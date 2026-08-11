@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Any, Final, TypeVar
 
 from app.core.config import AlpacaSettings, MarketDataSettings
@@ -224,6 +225,61 @@ class AlpacaMarketDataProvider:
             )
         return candles
 
+    async def get_historical_candles_batch(
+        self,
+        symbols: Sequence[str],
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, list[CandleData]]:
+        """Bars for many symbols in **one** request.
+
+        Alpaca's bars endpoint accepts a list, and using it is not an
+        optimisation so much as a correctness requirement at this scale: a
+        52-symbol universe across four timeframes is 208 sequential requests,
+        which both approaches the Basic plan's 200-per-minute ceiling and takes
+        longer than the five-minute interval the sync is scheduled at. Batched,
+        the same work is four requests.
+
+        A symbol the provider returns nothing for maps to an empty list rather
+        than being absent, so a caller can tell "asked and got nothing" from
+        "never asked".
+
+        Raises:
+            ProviderError: unsupported timeframe, invalid window, or a failure
+                that survived the retry budget. One bad *symbol* does not raise --
+                it simply has no bars.
+        """
+        wanted = [s.upper() for s in symbols]
+        if not wanted:
+            return {}
+
+        start, end = ensure_utc(start), ensure_utc(end)
+        if start >= end:
+            msg = f"start ({start.isoformat()}) must be before end ({end.isoformat()})"
+            raise ProviderError(msg)
+
+        results: dict[str, list[CandleData]] = {symbol: [] for symbol in wanted}
+
+        client = self._stock()
+        for chunk in _chunked(wanted, self._settings.max_symbols_per_request):
+            request = self._bars_request(chunk, timeframe, start, end)
+            response = await self._call(partial(client.get_stock_bars, request), "get_stock_bars")
+            for symbol in chunk:
+                raw_bars = _extract_bars(response, symbol)
+                candles, report = normalise_bars(raw_bars, symbol=symbol, end=end)
+                results[symbol] = candles
+                if report.rejected:
+                    logger.warning(
+                        "rejected malformed bars",
+                        provider=PROVIDER_NAME,
+                        symbol=symbol,
+                        rejected=len(report.rejected),
+                        first_reason=report.rejected[0].reason,
+                    )
+
+        return results
+
     async def get_latest_quote(self, symbol: str) -> Quote:
         """Most recent top-of-book quote.
 
@@ -265,7 +321,11 @@ class AlpacaMarketDataProvider:
     # -- Request construction ---------------------------------------------
 
     def _bars_request(
-        self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
+        self,
+        symbol: str | Sequence[str],
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
     ) -> Any:
         from alpaca.data.enums import Adjustment, DataFeed
         from alpaca.data.requests import StockBarsRequest
@@ -278,7 +338,7 @@ class AlpacaMarketDataProvider:
         amount, unit = spec
 
         return StockBarsRequest(
-            symbol_or_symbols=symbol,
+            symbol_or_symbols=list(symbol) if not isinstance(symbol, str) else symbol,
             timeframe=TimeFrame(amount, TimeFrameUnit(unit)),
             start=start,
             end=end,
@@ -698,6 +758,17 @@ def _retry_after(exc: Exception | None) -> float | None:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return None
+
+
+def _chunked(items: Sequence[str], size: int) -> list[list[str]]:
+    """Split into request-sized groups.
+
+    Alpaca accepts many symbols per request but not unboundedly many, and a very
+    long URL is its own failure mode. The cap is configuration rather than a
+    constant so it can be lowered without a release if the provider tightens it.
+    """
+    step = max(1, size)
+    return [list(items[index : index + step]) for index in range(0, len(items), step)]
 
 
 def build_alpaca_provider(

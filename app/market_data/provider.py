@@ -11,6 +11,7 @@ nothing and structural typing keeps test doubles trivial.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -202,6 +203,35 @@ class MarketDataProvider(Protocol):
 
 
 @runtime_checkable
+class BatchMarketDataProvider(MarketDataProvider, Protocol):
+    """Optional extension for providers that fetch many symbols in one request.
+
+    Separate for the same reason streaming is: forcing every provider to stub a
+    capability it lacks is noise, and a caller can fall back to per-symbol
+    requests. Consumers check ``isinstance(provider, BatchMarketDataProvider)``.
+
+    Batching is not a micro-optimisation at scale. A 52-symbol universe across
+    four timeframes is 208 sequential requests -- enough to approach Alpaca's
+    Basic-plan rate ceiling and to take longer than the interval the sync runs
+    at. Batched, it is four.
+    """
+
+    async def get_historical_candles_batch(
+        self,
+        symbols: Sequence[str],
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, list[CandleData]]:
+        """Bars for many symbols, keyed by symbol.
+
+        Every requested symbol appears in the result, mapping to an empty list
+        when the provider returned nothing -- so "asked and got nothing" stays
+        distinguishable from "never asked".
+        """
+        ...
+
+
 class StreamingMarketDataProvider(MarketDataProvider, Protocol):
     """Optional extension for providers with a realtime feed.
 

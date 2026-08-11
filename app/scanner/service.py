@@ -61,6 +61,7 @@ from app.market_data.provider import MarketDataProvider
 from app.market_data.quality import quote_age_seconds
 from app.market_data.repository import CandleRepository
 from app.notifications.service import NotificationService
+from app.paper.exits import BarPrices
 from app.paper.repository import PaperTradingRepository
 from app.paper.service import PaperTradingService
 from app.scanner.analysis import (
@@ -79,6 +80,7 @@ from app.scanner.lifecycle import (
 from app.scanner.ranking import RankedCandidate, rank_candidates, rank_score
 from app.scanner.repository import (
     SCOPE_SCAN,
+    SCOPE_SYNC,
     ScanRunRepository,
     SignalEvaluationRepository,
     TrackedSignalRepository,
@@ -180,6 +182,7 @@ class SymbolOutcome:
     notify_payload: dict[str, Any] | None = None
     paper_decisions: int = 0
     positions_opened: int = 0
+    positions_closed: int = 0
     paper_payload: dict[str, Any] | None = None
     portfolio_events: list[Event] = field(default_factory=list)
     """One event per portfolio that has a notification channel. Sent to that
@@ -229,9 +232,22 @@ class ScannerService:
         stats = ScanCycleStats(started_at=now)
         wanted = tuple(timeframes) if timeframes else self._scanner_timeframes()
 
+        # Recorded as a run so `ops status` can answer "when did data last
+        # arrive?". Without it the sync is invisible and a silently failing
+        # scheduler looks identical to a healthy one.
         async with session_scope(self._factory) as session:
             symbols = await WatchlistRepository(session).symbols()
+            run = await ScanRunRepository(session).acquire_lease(
+                scope=SCOPE_SYNC, lease_seconds=self._settings.scanner.lease_seconds, now=now
+            )
+            run_id = run.id if run is not None else None
         stats.symbols_total = len(symbols)
+
+        if run_id is None:
+            stats.skipped_reason = "another sync holds the lease"
+            stats.completed_at = utc_now()
+            logger.info("sync skipped; lease held elsewhere")
+            return stats
 
         for symbol in symbols:
             try:
@@ -246,6 +262,11 @@ class ScannerService:
                 logger.warning("market data sync failed", symbol=symbol, error=safe_message(exc))
 
         stats.completed_at = utc_now()
+        async with session_scope(self._factory) as session:
+            row = await session.get(ScanRun, run_id)
+            if row is not None:
+                await ScanRunRepository(session).complete(row, metrics=stats.metrics())
+
         logger.info(
             "market data sync complete",
             synced=stats.symbols_synced,
@@ -389,7 +410,14 @@ class ScannerService:
                 adjustment=PriceSeriesAdjustment.SPLIT_ADJUSTED,
             )
 
+        # Mark and exit open positions before considering anything new. Without
+        # this the scanner opens positions that can never close: stops, targets
+        # and holding limits all live in `process_bar`, and nothing else calls it.
         quote = await self._quote(symbol)
+        closed = await self._settle_open_positions(
+            session=session, instrument=instrument, analysis=analysis, quote=quote
+        )
+
         return await self._persist(
             session=session,
             instrument=instrument,
@@ -399,7 +427,69 @@ class ScannerService:
             now=now,
             run_id=run_id,
             paper=paper,
+            closed=closed,
         )
+
+    async def _settle_open_positions(
+        self,
+        *,
+        session: Any,
+        instrument: Instrument,
+        analysis: AnalysisResult,
+        quote: Quote | None,
+    ) -> list[tuple[str, Any]]:
+        """Push the newest primary bar through every profile.
+
+        Returns ``(routing_key, trade)`` for each position that closed, so the
+        caller can notify the owning portfolio's channel.
+
+        ``advance_clock=False`` matters and is not an optimisation. The bar
+        counter is per *portfolio*, not per instrument, so advancing it once per
+        symbol would age a 15-bar holding limit by fifty-two bars in a single
+        scan and close everything on the next cycle. Time exits therefore rely on
+        the calendar deadline, which counts trading days and is independent of
+        how many symbols happen to be watched.
+        """
+        primary = analysis.context.primary
+        if primary is None or primary.bar_timestamp is None or primary.close is None:
+            return []
+
+        price = Decimal(str(primary.close))
+        structure = primary.structure_metrics
+        high = Decimal(str(structure.resistance)) if structure and structure.resistance else price
+        low = Decimal(str(structure.support)) if structure and structure.support else price
+
+        service = PaperTradingService(
+            repository=PaperTradingRepository(session),
+            profiles=SimulationProfileRepository(session),
+            signals=SignalRepository(session),
+            decisions=TradeDecisionRepository(session),
+        )
+        outcomes = await service.process_bar(
+            instrument_id=instrument.id,
+            bar=BarPrices(
+                timestamp=primary.bar_timestamp,
+                open=price,
+                high=max(high, price),
+                low=min(low, price),
+                close=price,
+            ),
+            quote=quote,
+            advance_clock=False,
+        )
+
+        profiles = {
+            profile.name: profile
+            for profile in await SimulationProfileRepository(session).list_profiles(
+                enabled_only=True
+            )
+        }
+        closed: list[tuple[str, Any]] = []
+        for outcome in outcomes:
+            channel = getattr(profiles.get(outcome.profile_name), "notification_channel", None)
+            for trade in outcome.closed_trades:
+                closed.append((channel or "", trade))
+        return closed
 
     async def _persist(
         self,
@@ -412,6 +502,7 @@ class ScannerService:
         now: datetime,
         run_id: int,
         paper: bool,
+        closed: list[tuple[str, Any]] | None = None,
     ) -> SymbolOutcome:
         """Write the evaluation and advance the lifecycle. Always persists."""
         context = analysis.context
@@ -490,9 +581,13 @@ class ScannerService:
             paper_decisions=len(paper_result.decisions) if paper_result else 0,
             positions_opened=paper_result.positions_opened if paper_result else 0,
             paper_payload=_paper_payload(paper_result, evaluation) if paper_result else None,
-            portfolio_events=_portfolio_events(paper_result, evaluation, profiles_by_name)
-            if paper_result
-            else [],
+            portfolio_events=(
+                _portfolio_events(paper_result, evaluation, profiles_by_name)
+                if paper_result
+                else []
+            )
+            + _close_events(closed or [], symbol=instrument.symbol),
+            positions_closed=len(closed or []),
         )
 
     async def _run_paper(
@@ -668,6 +763,7 @@ def _apply_outcome(stats: ScanCycleStats, outcome: SymbolOutcome) -> None:
     stats.candidates_discovered += 1
     stats.paper_decisions += outcome.paper_decisions
     stats.positions_opened += outcome.positions_opened
+    stats.positions_closed += outcome.positions_closed
     if outcome.qualified:
         stats.signals_qualified += 1
     if outcome.strong:
@@ -844,6 +940,48 @@ def _portfolio_events(
                     "equity": float(profile.initial_capital),
                     "decisions": [{"profile": profile_name, "decision": "TRADE"}],
                     "positions_opened": 1,
+                },
+            )
+        )
+    return events
+
+
+def _close_events(closed: list[tuple[str, Any]], *, symbol: str) -> list[Event]:
+    """A CLOSE event per closed position, routed to its own portfolio channel.
+
+    Routing comes from the profile's stored ``notification_channel`` -- never
+    from the capital amount and never from the rendered text. A portfolio with
+    no channel produces no message, which is how the nine generic profiles stay
+    silent.
+
+    Gross, costs and net are all carried. A message reporting only net would hide
+    the cost model's output, and one reporting only gross would flatter every
+    result.
+    """
+    events: list[Event] = []
+    for channel, trade in closed:
+        if not channel:
+            continue
+        events.append(
+            Event.paper_trade_closed(
+                symbol=symbol,
+                routing_key=channel,
+                payload={
+                    "symbol": symbol,
+                    "portfolio": channel,
+                    "entry_price": float(trade.entry_price),
+                    "exit_price": float(trade.exit_price),
+                    "quantity": float(trade.quantity),
+                    "holding": f"{trade.holding_bars} bars",
+                    "exit_reason": trade.exit_reason.value
+                    if hasattr(trade.exit_reason, "value")
+                    else str(trade.exit_reason),
+                    "gross_pnl": float(trade.gross_pnl),
+                    "fees": float(trade.total_fees),
+                    "spread_cost": float(trade.total_spread_cost),
+                    "slippage_cost": float(trade.total_slippage_cost),
+                    "net_pnl": float(trade.net_pnl),
+                    "net_return": float(trade.net_return),
                 },
             )
         )

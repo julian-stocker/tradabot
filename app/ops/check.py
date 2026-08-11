@@ -30,9 +30,11 @@ from app.scanner.repository import (
     SCOPE_SCAN,
     SCOPE_SYNC,
     ScanRunRepository,
+    SignalEvaluationRepository,
     WatchlistRepository,
 )
 from app.scanner.sessions import describe_phase, is_after_close, session_phase
+from app.scanner.universe import universe_symbols
 from app.simulation.portfolios import PORTFOLIO_KEYS
 
 logger = get_logger(__name__)
@@ -287,6 +289,18 @@ class OperationalStatus:
     portfolios: list[PortfolioStatus] = field(default_factory=list)
     session_closed: bool = False
 
+    # -- Scale (Part R) ----------------------------------------------------
+    universe_size: int = 0
+    watchlist_size: int = 0
+    last_sync_duration: float | None = None
+    last_sync_symbols: int = 0
+    last_sync_failures: int = 0
+    last_scan_duration: float | None = None
+    last_scan_evaluated: int = 0
+    last_scan_qualified: int = 0
+    last_scan_strong: int = 0
+    evaluations_stored: int = 0
+
 
 async def operational_status(session: AsyncSession, settings: Settings) -> OperationalStatus:
     """Assemble the operational picture. Contains no secret."""
@@ -333,6 +347,16 @@ async def operational_status(session: AsyncSession, settings: Settings) -> Opera
 
     return OperationalStatus(
         checked_at=now,
+        universe_size=len(universe_symbols()),
+        watchlist_size=await WatchlistRepository(session).count(),
+        last_sync_duration=sync.duration_seconds if sync else None,
+        last_sync_symbols=sync.symbols_synced if sync else 0,
+        last_sync_failures=sync.symbols_failed if sync else 0,
+        last_scan_duration=scan.duration_seconds if scan else None,
+        last_scan_evaluated=scan.symbols_evaluated if scan else 0,
+        last_scan_qualified=scan.signals_qualified if scan else 0,
+        last_scan_strong=scan.signals_strong if scan else 0,
+        evaluations_stored=await SignalEvaluationRepository(session).count(),
         session_phase=describe_phase(session_phase(calendar, now), now),
         last_sync=sync.started_at if sync else None,
         last_scan=scan.started_at if scan else None,

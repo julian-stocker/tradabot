@@ -25,12 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import InstrumentNotFoundError, ProviderError
 from app.core.events import Event, EventPublisher, NullEventPublisher
 from app.core.logging import get_logger
+from app.core.redaction import safe_message
 from app.core.time import ensure_utc, utc_now
 from app.corporate_actions.repository import CorporateActionRepository
 from app.domain.enums import Timeframe
 from app.instruments.repository import InstrumentRepository
 from app.market_data.calendars import get_trading_calendar
-from app.market_data.provider import MarketDataProvider
+from app.market_data.provider import BatchMarketDataProvider, MarketDataProvider
 from app.market_data.quality import CandleGap, check_series, expected_bar_count
 from app.market_data.repository import CandleRepository
 from app.paper.corporate_actions import PositionCorporateActionService
@@ -334,6 +335,12 @@ class MarketDataImportService:
         started = ensure_utc(now) if now is not None else utc_now()
         report = SyncReport(provider=self._provider.name, started_at=started, finished_at=started)
 
+        if isinstance(self._provider, BatchMarketDataProvider):
+            await self._sync_batched(
+                symbols=symbols, timeframe=timeframe, started=started, report=report
+            )
+            return await self._finish_sync(report, started=started, now=now)
+
         for symbol in symbols:
             try:
                 report.reports.append(
@@ -352,6 +359,95 @@ class MarketDataImportService:
                     )
                 )
 
+        return await self._finish_sync(report, started=started, now=now)
+
+    async def _sync_batched(
+        self,
+        *,
+        symbols: Sequence[str],
+        timeframe: Timeframe,
+        started: datetime,
+        report: SyncReport,
+    ) -> None:
+        """One request for the whole watchlist, then persist per symbol.
+
+        The window is the **widest** any symbol needs. Symbols sync at slightly
+        different points -- one added yesterday, the rest current -- and a batched
+        request has a single window, so it must cover the furthest-behind one.
+        The upsert makes the extra bars other symbols receive free, and fetching
+        one window is still enormously cheaper than one request each.
+
+        A provider failure fails *all* symbols in the batch, and each is recorded
+        individually so the report reads the same as the per-symbol path. That is
+        the honest trade: batching couples their fate, and pretending otherwise
+        would hide why fifty-two symbols failed together.
+        """
+        wanted = [symbol.upper() for symbol in symbols]
+        instruments: dict[str, int] = {}
+        earliest: datetime | None = None
+
+        for symbol in wanted:
+            instrument = await self._instruments.get_by_symbol(symbol)
+            if instrument is None:
+                report.reports.append(
+                    _failed_report(
+                        symbol,
+                        timeframe,
+                        started,
+                        self._provider.name,
+                        f"{symbol} is not in the instrument table",
+                    )
+                )
+                continue
+            instruments[symbol] = instrument.id
+            latest = await self._candles.latest_timestamp(
+                instrument_id=instrument.id, timeframe=timeframe
+            )
+            start = (
+                latest - timeframe.duration * REFETCH_OVERLAP_BARS
+                if latest is not None
+                else started - timedelta(days=backfill_days_for(timeframe))
+            )
+            earliest = start if earliest is None else min(earliest, start)
+
+        if not instruments or earliest is None:
+            return
+
+        try:
+            batches = await self._provider.get_historical_candles_batch(  # type: ignore[attr-defined]
+                list(instruments), timeframe, earliest, started
+            )
+        except ProviderError as exc:
+            message = safe_message(exc)
+            logger.warning("batched sync failed", timeframe=timeframe.value, error=message)
+            for symbol in instruments:
+                report.reports.append(
+                    _failed_report(symbol, timeframe, started, self._provider.name, message)
+                )
+            return
+
+        for symbol, instrument_id in instruments.items():
+            candles = batches.get(symbol, [])
+            item = ImportReport(
+                symbol=symbol,
+                timeframe=timeframe,
+                start=earliest,
+                end=started,
+                provider=self._provider.name,
+                received_bars=len(candles),
+            )
+            if candles:
+                item.inserted_bars = await self._candles.upsert_many(
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    candles=candles,
+                    provider=self._provider.name,
+                )
+            report.reports.append(item)
+
+    async def _finish_sync(
+        self, report: SyncReport, *, started: datetime, now: datetime | None
+    ) -> SyncReport:
         report.finished_at = utc_now() if now is None else started
         await self._events.publish(
             Event.market_data_sync_completed(
@@ -455,6 +551,19 @@ class MarketDataImportService:
                 positions=len(adjustments),
             )
         return len(adjustments)
+
+
+def _failed_report(
+    symbol: str, timeframe: Timeframe, moment: datetime, provider: str, error: str
+) -> ImportReport:
+    return ImportReport(
+        symbol=symbol,
+        timeframe=timeframe,
+        start=moment,
+        end=moment,
+        provider=provider,
+        error=error,
+    )
 
 
 def _log_fields(report: ImportReport) -> dict[str, object]:

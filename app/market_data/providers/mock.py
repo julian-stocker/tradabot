@@ -24,6 +24,7 @@ has been tuned on a random number generator.
 from __future__ import annotations
 
 import zlib
+from collections.abc import Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Final
@@ -503,6 +504,24 @@ class MockMarketDataProvider:
         symbol = symbol.upper()
         self._require_known(symbol)
         return sorted(_CORPORATE_ACTIONS.get(symbol, ()), key=lambda a: a.effective_at)
+
+    async def get_historical_candles_batch(
+        self,
+        symbols: Sequence[str],
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, list[CandleData]]:
+        """Bars for many symbols.
+
+        Implemented by looping, because the mock has no request to batch -- it
+        generates deterministically. The point is that the *batch code path* is
+        exercisable offline, so a test of the sync logic does not need Alpaca.
+        """
+        return {
+            symbol.upper(): await self.get_historical_candles(symbol, timeframe, start, end)
+            for symbol in symbols
+        }
 
     async def get_latest_quote(self, symbol: str) -> Quote:
         """Synthetic top-of-book derived from the most recent close.

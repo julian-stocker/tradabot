@@ -445,8 +445,23 @@ async def _ops_status(settings: Settings) -> int:
         def when(moment: object) -> str:
             return moment.isoformat() if isinstance(moment, datetime) else "(never)"
 
+        def secs(value: float | None) -> str:
+            return f"{value:.1f}s" if value is not None else "-"
+
         print(f"\nchecked at        : {status.checked_at.isoformat()}")
         print(f"session           : {status.session_phase}")
+        print(f"universe          : {status.universe_size} symbols defined")
+        print(f"watchlist         : {status.watchlist_size} enabled")
+        print(
+            f"last sync         : {secs(status.last_sync_duration)}  "
+            f"{status.last_sync_symbols} synced, {status.last_sync_failures} failed"
+        )
+        print(
+            f"last scan detail  : {secs(status.last_scan_duration)}  "
+            f"{status.last_scan_evaluated} evaluated, "
+            f"{status.last_scan_qualified} qualified, {status.last_scan_strong} strong"
+        )
+        print(f"evaluations kept  : {status.evaluations_stored}")
         print(f"last market sync  : {when(status.last_sync)}")
         print(f"last scan         : {when(status.last_scan)}  ({status.last_scan_status or '-'})")
         print(f"last scan success : {when(status.last_success)}")
@@ -750,8 +765,15 @@ async def _scanner_demo(settings: Settings) -> int:
     """
     engine = create_engine(settings)
     factory = create_session_factory(engine)
+    # Console notifier, and the session gate lifted. The demo exercises execution
+    # *mechanics* with constructed prices; requiring a live market session would
+    # make it pass during the day and silently do nothing in the evening, which
+    # is the opposite of deterministic. Real scans keep the gate.
     demo_settings = settings.model_copy(
-        update={"notifications": settings.notifications.model_copy(update={"console": True})}
+        update={
+            "notifications": settings.notifications.model_copy(update={"console": True}),
+            "scanner": settings.scanner.model_copy(update={"require_regular_session": False}),
+        }
     )
     try:
         now = utc_now()

@@ -26,6 +26,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
 
+# A leaf data module with no application imports, so this cannot cycle. Importing
+# it keeps ONE authoritative universe: the alternative -- repeating the symbols
+# here as a default -- is exactly the duplicate list that goes stale.
+from app.scanner.universe import universe_symbols
+
 _PORTFOLIO_WEBHOOK_KEY = re.compile(r"paper_(?P<suffix>[a-z0-9_]+)_webhook")
 
 WEIGHT_SUM_TOLERANCE = 1e-6
@@ -116,6 +121,16 @@ class AlpacaSettings(BaseModel):
     backoff_base_seconds: float = Field(default=0.5, gt=0)
     backoff_max_seconds: float = Field(default=30.0, gt=0)
     max_bars_per_request: int = Field(default=10_000, ge=1, le=10_000)
+    max_symbols_per_request: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description=(
+            "Symbols per batched bars request. Alpaca accepts many but not "
+            "unboundedly many, and a very long URL is its own failure mode. "
+            "Configurable so the cap can be lowered without a release."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -152,11 +167,14 @@ class MarketDataSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     watchlist: tuple[str, ...] = Field(
-        default=("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA"),
+        default_factory=universe_symbols,
         description=(
-            "Symbols to synchronise. **Development examples, not investment "
-            "recommendations.** Configuration, not strategy: nothing in the engine "
-            "reads this list to decide anything."
+            "Symbols the provider serves. Defaults to the full universe in "
+            "app/scanner/universe.py -- **one authoritative list**, not a second "
+            "copy that drifts. Override with a comma-separated environment "
+            "variable for a smaller development set. **Development examples, not "
+            "investment recommendations**: nothing in the engine reads this list "
+            "to decide anything."
         ),
     )
     default_exchange: str = Field(
