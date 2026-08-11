@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# tradabot local stack: API + TimescaleDB.
+#
+# Secrets come from .env (see .env.example). Nothing is hardcoded here -- the
+# `?err` syntax makes compose fail loudly rather than starting with a blank
+# password.
+# ---------------------------------------------------------------------------
+
+services:
+  db:
+    # TimescaleDB is a PostgreSQL extension, so this image is a drop-in Postgres.
+    # If the extension is ever unwanted, swapping to `postgres:16` works without
+    # any application change -- migration 0002 detects and skips.
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: tradabot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # Faster and safer defaults for a local development database.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - tradabot-db-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` alone returns true before the database accepts real queries,
+      # so this runs an actual query instead.
+      test: ["CMD-SHELL", "psql -U $${POSTGRES_USER} -d $${POSTGRES_DB} -c 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: tradabot-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database host is `db`, not localhost.
+      TRADABOT_DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      TRADABOT_ENV: ${TRADABOT_ENV:-development}
+      TRADABOT_LOG_LEVEL: ${TRADABOT_LOG_LEVEL:-INFO}
+      TRADABOT_LOG_FORMAT: ${TRADABOT_LOG_FORMAT:-json}
+      TRADABOT_MARKET_DATA_PROVIDER: ${TRADABOT_MARKET_DATA_PROVIDER:-mock}
+      TRADABOT_MOCK_SEED: ${TRADABOT_MOCK_SEED:-1337}
+    ports:
+      - "${TRADABOT_API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  tradabot-db-data:
+    name: tradabot-db-data

@@ -1,0 +1,289 @@
+# Roadmap
+
+Each phase lists **entry criteria** (what must be true before starting) and **exit
+criteria** (what must be demonstrably true before it counts as done). Phases are
+ordered by dependency, not ambition.
+
+The recurring principle: *no phase may produce a number that a later phase would have
+to retract.* Capability that cannot yet be evaluated honestly is deferred rather than
+shipped with a disclaimer.
+
+---
+
+## Phase 1 — Foundation and deterministic market analysis ✅
+
+**Status:** complete.
+
+Vertical slice: market data → normalised storage → features → signal → API.
+
+**Delivered**
+- Modular monolith, strict module boundaries, strict typing throughout
+- Instrument + OHLCV schema with `Decimal` prices and UTC-aware timestamps
+- `MarketDataProvider` protocol + deterministic `MockMarketDataProvider`
+- Quote model with spread arithmetic; configurable round-trip cost model
+- Polars feature engine with a registry and verified warm-up declarations
+- Explainable rule-based signal engine with directional/quality separation
+- Cost-aware `NetEdge` on every signal
+- Explicit `Horizon` modelling across short/medium/long term
+- FastAPI endpoints with OpenAPI docs
+- 234 deterministic offline tests, including prefix-invariance over every feature
+- Docker + TimescaleDB compose stack; Alembic migrations with no model drift
+
+**Explicit non-goals met:** no ML, no backtester, no order execution, no broker API.
+
+---
+
+## Phase 2 — Data integrity and simulation domain ✅
+
+**Status:** complete.
+
+Correct historical data, and the domain model multi-profile paper trading needs.
+
+**Delivered**
+- Instrument lifecycle (`listed_at` / `delisted_at`) with a half-open
+  `is_tradable_at()` rule, and `UniverseService` for point-in-time queries
+- Corporate actions in one extensible table: splits and cash dividends adjusted
+  for, four more types recordable without a migration
+- Explicit `RAW` / `SPLIT_ADJUSTED` / `TOTAL_RETURN` series, adjustment computed
+  on read so raw provider data is never overwritten
+- Adjustment applied at the `FeatureService` boundary; no indicator has an
+  adjustment opinion
+- Persisted signals, so one signal can fan out to many profile decisions
+- `BrokerCostProfile` / `RiskProfile` / `SimulationProfile` — normalised so nine
+  portfolios share three risk rows
+- `TradeDecision` records, including **rejected** signals with the economics that
+  caused the rejection
+- `Broker` protocol (interfaces only)
+- 166 new tests; 400 total
+
+**Explicit non-goals met:** no ML, no paper-trading engine, no order execution, no
+real provider, no scanner.
+
+**Proved by measurement:** on a window spanning NVDA's 10-for-1 split, the raw
+series scores NEUTRAL on a −88% 20-day return; the adjusted series scores BULLISH
+on +18%. And one signal at score 62 produces TRADE for three €5000 portfolios and
+SKIP for six smaller ones, purely because a €1.00 fee is 4012 bps of a €5 position.
+
+---
+
+## Phase 3 — Multi-profile paper-trading engine ✅
+
+**Status:** complete.
+
+The full virtual lifecycle: signal → decision → order → fill → position →
+monitoring → exit → realised P&L → performance.
+
+**Delivered**
+- `PaperBroker` implementing the phase 2 `Broker` protocol, with execution gates
+  distinct from decision gates (`OrderRejectionReason` vs `DecisionReason`)
+- Per-leg fill pricing: buys from the ask, sells from the bid, slippage always
+  adverse — reconciling exactly with the phase 1 round-trip cost model
+- Risk-based position sizing capped by position, cash and exposure limits, with
+  the binding constraint recorded on every order
+- Persistent portfolios, orders, positions, trades and equity snapshots; the
+  database is the source of truth and the engine holds no state between calls
+- Conservative same-bar ambiguity policy and realistic gap fills, both flagged on
+  the position so results resting on a guess are identifiable
+- **No-look-ahead enforced structurally**: executing at or before the signal bar
+  raises `LookAheadError`
+- Idempotent replay via UNIQUE idempotency keys; restart recovery with no special
+  case; transactional atomicity across order, cash and position
+- Counterfactual `decision_outcomes` for SKIP decisions
+- Read-only API and a deterministic `make demo-simulation`
+- 123 new tests; 523 total
+
+**Explicit non-goals met:** no live trading, no broker APIs, no ML, no scanner, no
+strategy self-modification.
+
+**Demonstrated:** one STRONG_BULLISH signal opens 6 positions across 9 portfolios.
+All three €50 portfolios decline it — at the *decision* stage, because a €1.00 fee
+is 415 bps of a €50 round trip and destroys the expected edge.
+
+**Deliberate limitations:** long-only, market orders only, no partial fills, no
+liquidity model, `max_daily_loss` stored but not enforced. Each is refused
+explicitly rather than approximated.
+
+---
+
+## Phase 3b — Real market-data provider integration
+
+**Entry:** phase 3 complete. Was "phase 2b"; renumbered because the paper engine
+landed first.
+
+The adjustment layer (phase 2) and the execution engine (phase 3) both exist and
+are tested against synthetic data. Everything downstream now needs *real* prices:
+a backtest, a scanner and an ML baseline built on a random number generator
+measure nothing.
+
+**Scope**
+- One real provider adapter behind the existing protocol, with its
+  corporate-action feed
+- Exchange calendars — real sessions, holidays, half-days, DST. Unlocks
+  `max_daily_loss` (needs a session boundary) and replaces the bar-counted
+  holding period with real trading days
+- Backfill of `listed_at` / `delisted_at` from provider reference data
+- Rate limiting, retry with backoff, provider-error taxonomy
+- Data-quality checks: gap detection, duplicate bars, impossible prices, stale quotes
+- Announcement dates on corporate actions, replacing the effective-date proxy
+
+**Exit**
+- Two providers coexist and are switchable by configuration alone
+- A documented reconciliation showing adjusted prices match an independent source
+- The paper engine runs on real data with no code change
+
+**Risk:** corporate-action *coverage* and exchange calendars are unglamorous and
+consume more time than expected.
+
+---
+
+## Phase 4 — Market scanner
+
+**Entry:** phase 3b — scanning synthetic data is theatre.
+
+**Scope**
+- Batch evaluation across the universe (`ScanRequest` / `ScanResult` already defined)
+- Filtering by score, classification, confidence, and **positive net edge**
+- Ranking, and persistence of scan results for later evaluation
+- Incremental computation so a full-universe scan is not a full recompute
+
+**Exit**
+- Full universe scans within an acceptable local time budget
+- Every result reports `instruments_scanned` and `hit_rate`
+
+**Hazard, stated up front:** scanning 500 instruments for "score > 55" is a
+multiple-comparisons trap. At any plausible false-positive rate it returns hits every
+day regardless of whether the signal predicts anything. The base-rate fields are
+mandatory for this reason, and scan results must be stored so their forward performance
+can be measured in phase 5.
+
+---
+
+## Phase 5 — Backtesting engine
+
+**Entry:** phase 3b. Point-in-time universe data exists as of phase 2, but
+backtesting synthetic data proves only that the harness runs.
+
+**Scope**
+- Event-driven engine over the `DataFeed` / `ExecutionModel` / `Strategy` protocols
+- Realistic fills: execution lag, adverse spread and slippage, volume caps
+- Position sizing, stops, portfolio-level constraints
+- Full metrics: gross/net/benchmark returns, drawdown, cost drag, trade history
+
+**Exit**
+- Every constraint in [backtesting.md](backtesting.md) satisfied
+- A deliberately look-ahead-biased strategy in the test suite scores *impossibly* well,
+  proving the harness detects bias
+- The phase 1 heuristic weights are evaluated — and revised or discarded on the evidence
+
+**This is the most important phase in the roadmap.** Everything before it produces
+untested hypotheses; everything after it depends on being able to falsify them.
+
+---
+
+## Phase 6 — Spread and execution-cost calibration
+
+**Entry:** phase 5, plus observed quote data.
+
+**Scope**
+- Historical quote/spread storage, so past spreads are reconstructable instead of
+  assumed
+- Spread modelling by time of day, volatility regime, and instrument liquidity
+- Market-impact estimation for size relative to displayed volume
+- Replace `CostSettings` defaults with measured values per broker
+- Replace the invented `expected_move_capture_ratio` with a calibrated estimate
+
+**Exit**
+- Modelled costs reconcile against a sample of real fills
+- Backtests re-run with calibrated costs, and the delta versus assumed costs reported
+
+**Expect this phase to hurt.** Realistic costs are where marginal strategies die. That
+is the phase working correctly, not failing.
+
+---
+
+## Phase 7 — Machine-learning baseline
+
+**Entry:** phase 5 at minimum, ideally phase 6. See [ml.md](ml.md).
+
+**Scope**
+- Labelled dataset builder with purge gaps and cost-aware thresholds
+- Logistic regression predicting `P(return > round-trip cost)`
+- Calibration measurement (reliability curves, Brier score)
+- Comparison against buy-and-hold and the rule-based signal
+
+**Exit**
+- The baseline beats all four control baselines out-of-sample, **or** the negative
+  result is documented and ML is deferred
+
+A negative result here is a genuine success. It is much cheaper to learn that the
+features contain no exploitable signal than to deploy a model that believes they do.
+
+---
+
+## Phase 8 — Walk-forward ML evaluation
+
+**Entry:** phase 7 showing signal.
+
+**Scope**
+- Walk-forward harness with expanding/rolling windows
+- Gradient boosting (XGBoost / LightGBM), Optuna inside the walk-forward loop
+- Per-fold stability analysis and regime-conditional performance
+- Experiment tracking: parameters, seeds, data range, code version
+
+**Exit**
+- Performance stable across folds, not concentrated in one regime
+- Calibrated probabilities feeding the existing `NetEdge` gate
+- Number of configurations tried reported with every result
+
+---
+
+## Phase 9 — Web dashboard
+
+**Entry:** phase 4; more useful after phase 5.
+
+**Scope**
+- Next.js frontend against the existing API
+- Charts with feature and signal overlays
+- Signal explanations surfaced prominently — reasons *and* risks
+- Backtest result visualisation
+- **Authentication**, before this is reachable from anywhere but localhost
+
+**Exit**
+- Every number displayed traceable to its inputs
+- Uncertainty and cost shown alongside every signal, not buried in a detail view
+
+---
+
+## Phase 10 — Alerts and continuous monitoring
+
+**Entry:** phase 3.
+
+**Scope**
+- Scheduled scans and continuous evaluation
+- Alerting on high-conviction, cost-positive setups
+- Data-freshness and pipeline-health monitoring
+- **Signal-decay tracking** — measuring whether live performance still matches backtest
+
+**Exit**
+- Alerts are rare enough to be worth reading
+- Automatic flagging when live performance diverges from expectation
+
+The decay tracking matters most. A strategy that worked historically and stopped
+working is the normal outcome, and noticing quickly is worth more than any single
+improvement in the model.
+
+---
+
+## Permanent non-goals
+
+Not scheduled, and not intended to be:
+
+- **Automatic order execution.** No broker order placement, ever.
+- **Unofficial broker APIs.** Including Trade Republic. Cost settings are entered
+  manually as `BrokerCostProfile` rows.
+- **Strategy self-modification.** The feedback system collects evidence; it never
+  rewrites trading rules automatically. See
+  [simulation-design.md](simulation-design.md#the-critical-constraint-on-feedback).
+- **Guaranteed predictions.** Outputs are probabilistic and provisional.
+- **Financial advice.**
+- **Multi-tenant SaaS.** Local-first is a design choice, not a stepping stone.

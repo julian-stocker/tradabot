@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Read(//Users/julianstocker/.pyenv/**)",
+      "Read(//Users/julianstocker/miniconda3/**)",
+      "Read(//Library/Frameworks/Python.framework/Versions/**)",
+      "Read(//Library/Frameworks/Python.framework/Versions/3.12/**)",
+      "Bash(/usr/bin/python3 --version)",
+      "Read(//usr/local/Cellar/python@3.12/3.12.3/bin/**)",
+      "Bash(/usr/local/opt/python@3.12/bin/python3.12 --version)",
+      "Read(//usr/local/Cellar/python@3.12/**)",
+      "Read(//usr/local/Cellar/**)",
+      "Bash(.venv/bin/python -m pip install -q -e \".[dev]\")",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(.venv/bin/python -m pip list)"
+    ]
+  }
+}

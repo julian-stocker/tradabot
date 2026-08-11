@@ -1,0 +1,298 @@
+# tradabot
+
+A local-first platform for **stock-market analysis, signal generation, backtesting and
+probabilistic forecasting**.
+
+tradabot continuously ingests market data, computes transparent features, and produces
+explainable, statistically testable directional signals — always accounting for the
+transaction costs that decide whether an edge survives contact with a broker.
+
+---
+
+## What tradabot is
+
+- A **research and analysis platform** you run on your own machine.
+- A system for producing **explainable, rule-based signals** — every signal states the
+  evidence for it and the risks against it.
+- A framework built so that signals can be **honestly backtested** and, later,
+  evaluated with walk-forward machine learning.
+- A place where **transaction costs are first-class**, not an afterthought. A bullish
+  forecast that is smaller than the round-trip spread plus fees is not an opportunity.
+
+## What tradabot is **not**
+
+- **Not a price predictor.** Nothing here claims to know where a stock will go.
+  Outputs are probabilistic and provisional.
+- **Not a trading bot.** There is no order execution, no broker integration, and no
+  path to placing a real order. That is a deliberate architectural boundary.
+- **Not financial advice.** The baseline scoring weights are *heuristics chosen for
+  legibility*, with zero statistical validation. They exist to be falsified by the
+  backtesting engine in phase 4.
+- **Not backed by real data yet.** Phase 1 ships a deterministic synthetic data
+  provider. Any "result" produced today is a result about a random number generator.
+
+---
+
+## Architecture at a glance
+
+A **modular monolith**. One deployable process, strict module boundaries inside it.
+Microservices would add distributed-systems failure modes to a problem that does not
+yet have them.
+
+```
+app/
+├── core/              Configuration, logging, UTC time helpers, error hierarchy
+├── domain/            Shared vocabulary: Timeframe, Horizon, Quote, Classification
+├── db/                SQLAlchemy models, custom Decimal/UTC column types, sessions
+├── instruments/       Instrument repository, service, point-in-time universe
+├── market_data/       Provider abstraction, mock provider, ingestion, candle repository
+├── corporate_actions/ Splits and dividends; the price-adjustment layer
+├── features/          Polars feature engine, indicators, registry
+├── costs/             Spread, fee and slippage modelling; net-edge calculation
+├── signals/           Rule-based scoring components, signal engine, persistence
+├── simulation/        Simulation profiles, position sizing, trade decisions
+├── paper/             PaperBroker, execution, exits, portfolio accounting, engine
+├── broker/            Broker protocol (implemented by app/paper/broker.py)
+├── forecasting/       Interfaces for future probabilistic forecasts (no implementation)
+├── backtesting/       Data structures and protocols for the future engine (no engine)
+├── scanner/           Interfaces for the future market scanner (no implementation)
+└── api/               FastAPI routes and wire schemas — thin, no business logic
+```
+
+The dependency rule is one-directional:
+
+```
+api → {instruments, market_data, corporate_actions, features,
+       signals, costs, simulation, paper} → domain → core
+                        ↓
+                       db
+```
+
+`features/` never imports `db/`. `signals/` never imports `api/`. `domain/` imports
+nothing but `core/`. See [docs/architecture.md](docs/architecture.md) for the reasoning.
+
+---
+
+## Quick start
+
+### Option A — Docker (recommended)
+
+```bash
+cp .env.example .env          # then edit POSTGRES_PASSWORD and TRADABOT_DATABASE_URL
+docker compose up --build
+```
+
+The API is then on <http://localhost:8000>, docs on <http://localhost:8000/docs>.
+
+Migrations run automatically on container start. To seed synthetic data:
+
+```bash
+docker compose exec api python -m app.cli seed --symbols NVDA,AAPL,MSFT --days 400
+docker compose exec api python -m app.cli seed-profiles
+```
+
+### Option B — local Python
+
+Requires Python 3.12+ and a reachable PostgreSQL (or just use SQLite, below).
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+
+# Point at SQLite for a zero-infrastructure run:
+export TRADABOT_DATABASE_URL="sqlite+aiosqlite:///./tradabot.db"
+
+make migrate          # apply migrations
+make seed             # ingest synthetic instruments, corporate actions and candles
+make seed-profiles    # install the 9 default simulation profiles
+make demo-simulation  # run a deterministic paper-trading simulation
+make dev              # start the API with autoreload
+```
+
+> **SQLite is for convenience and tests only.** TimescaleDB is the supported target;
+> SQLite lacks the numeric type, the time-partitioning and the concurrency the real
+> workload needs.
+
+---
+
+## Common commands
+
+| Command | What it does |
+|---|---|
+| `make dev` | Run the API with autoreload on `:8000` |
+| `make test` | Run the full test suite |
+| `make test-cov` | Tests with a coverage report |
+| `make lint` | Ruff lint checks |
+| `make format` | Ruff auto-format + import sorting |
+| `make typecheck` | mypy in strict mode |
+| `make check` | `format-check` + `lint` + `typecheck` + `test` — run before committing |
+| `make migrate` | Apply all migrations (`alembic upgrade head`) |
+| `make migration m="..."` | Autogenerate a new migration |
+| `make downgrade` | Roll back one migration |
+| `make seed` | Ingest deterministic synthetic data (instruments, actions, candles) |
+| `make seed-profiles` | Install the default simulation-profile catalogue |
+| `make demo-simulation` | Run the deterministic multi-profile paper-trading demo |
+| `make up` / `make down` | Start / stop the Docker stack |
+| `make clean` | Remove caches and build artefacts |
+
+---
+
+## Running tests
+
+```bash
+make test
+```
+
+Tests are **fully deterministic and fully offline**. There are no network calls, no
+sleeps, and no wall-clock dependence. Database tests run against SQLite in-memory by
+default, so no container is required.
+
+Notable test categories:
+
+- `tests/unit/test_indicators.py` — indicators against hand-computed expected values.
+- `tests/unit/test_no_lookahead.py` — a **property test over every registered feature**:
+  truncating the candle series immediately after bar *i* must not change any feature
+  value at bar *i*. Any feature that peeks into the future fails this automatically,
+  including features added years from now.
+- `tests/unit/test_adjustments.py` — split/dividend modelling; a 2-for-1 split must
+  not appear as a −50% return in the adjusted series.
+- `tests/unit/test_split_features.py` — a split must not create return, volatility,
+  ATR or moving-average artefacts, and prefix invariance must survive adjustment.
+- `tests/unit/test_simulation.py` — profile validation, position sizing, decision
+  gates, and the fixed-fee impact at €50 vs €5000.
+- `tests/unit/test_paper_exits.py` — stop/target rules, **same-bar ambiguity**
+  (a bar touching both must resolve to the stop) and **gap fills** (a stop at 100
+  fills at 95 when the market opens there).
+- `tests/integration/test_paper_lifecycle.py` — the full lifecycle, plus
+  **no-look-ahead** (a fill on the signal bar raises), portfolio isolation,
+  idempotent replay, restart recovery and transactional rollback.
+- `tests/unit/test_costs.py` — spread arithmetic and round-trip cost accounting.
+- `tests/unit/test_signals.py` — component scoring, classification boundaries, weights.
+- `tests/integration/` — repository and ingestion behaviour against a real database.
+- `tests/api/` — endpoint contracts via `httpx.ASGITransport`.
+
+---
+
+## Database migrations
+
+```bash
+make migration m="add dividend adjustments"   # autogenerate from model changes
+make migrate                                  # apply
+make downgrade                                # roll back one revision
+```
+
+Always read generated migrations before applying them. Alembic autogenerate does not
+detect column type changes reliably and will happily generate a destructive downgrade.
+
+### TimescaleDB
+
+The `candles` table is converted into a hypertable partitioned on `timestamp` by
+migration `0002`. That migration **degrades gracefully**: if the `timescaledb`
+extension is unavailable (plain PostgreSQL, SQLite), it logs and skips, leaving a
+perfectly functional regular table. Nothing in the application logic depends on
+Timescale being present.
+
+---
+
+## API endpoints
+
+All under the `/api/v1` prefix. Interactive docs at `/docs`, schema at
+`/openapi.json`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness + database connectivity |
+| `GET` | `/api/v1/instruments` | List instruments (filter by exchange, asset type) |
+| `GET` | `/api/v1/instruments/{symbol}` | Instrument detail |
+| `GET` | `/api/v1/instruments/{symbol}/candles` | OHLCV in a time window |
+| `GET` | `/api/v1/instruments/{symbol}/features` | Computed feature series |
+| `GET` | `/api/v1/instruments/{symbol}/features/latest` | Fully warmed-up feature snapshot |
+| `GET` | `/api/v1/instruments/{symbol}/signal` | Explainable signal for a horizon |
+| `GET` | `/api/v1/instruments/{symbol}/quote` | Latest quote with spread metrics |
+| `GET` | `/api/v1/instruments/{symbol}/corporate-actions` | Splits and dividends |
+| `GET` | `/api/v1/universe` | Instruments tradable at a point in time |
+| `GET` | `/api/v1/simulation/profiles` | Configured virtual portfolios |
+| `GET` | `/api/v1/simulation/profiles/{name}` | One portfolio's configuration |
+| `GET` | `/api/v1/simulation/overview` | Every virtual portfolio side by side |
+| `GET` | `/api/v1/simulation/profiles/{name}/portfolio` | Cash, equity, exposure, drawdown |
+| `GET` | `/api/v1/simulation/profiles/{name}/positions` | Virtual positions |
+| `GET` | `/api/v1/simulation/profiles/{name}/orders` | Orders, including rejections |
+| `GET` | `/api/v1/simulation/profiles/{name}/trades` | Completed round trips |
+| `GET` | `/api/v1/simulation/profiles/{name}/performance` | Derived performance summary |
+| `POST` | `/api/v1/admin/sync` | Ingest instruments, actions and candles |
+
+The feature and signal endpoints take an `adjustment` parameter
+(`RAW` | `SPLIT_ADJUSTED` | `TOTAL_RETURN`), defaulting to `SPLIT_ADJUSTED`.
+
+---
+
+## Current limitations
+
+These are known and deliberate, not oversights:
+
+1. **Synthetic data only.** `MockMarketDataProvider` generates seeded geometric
+   Brownian motion. It has no earnings, gaps, halts, or real microstructure.
+2. **Corporate actions cover splits and dividends only.** Spin-offs, mergers and
+   symbol changes can be *recorded* but are not adjusted for. See
+   [docs/data-adjustments.md](docs/data-adjustments.md).
+3. **No exchange calendar.** Sessions and holidays are approximated. `Timeframe.duration`
+   is nominal wall-clock time.
+4. **Signal weights are arbitrary.** They are legible guesses, marked as such
+   everywhere they appear. Do not read meaning into a score of 42.
+5. **No backtester.** Only the data structures and protocols exist. Any claim about
+   historical performance is currently unsupported.
+6. **No machine learning.** By design — see [docs/ml.md](docs/ml.md).
+7. **Single-venue symbols.** `symbol` is globally unique; multi-venue listings need a
+   `(symbol, exchange)` key change.
+8. **One timeframe evaluated.** Horizons are modelled explicitly throughout, but only
+   daily-bar signals are computed today.
+9. **Paper trading is long-only, market-orders-only.** Shorts and limit orders are
+   refused rather than approximated. No partial fills, no liquidity model.
+   `max_daily_loss` is stored but not yet enforced.
+10. **Lifecycle, not index membership.** The universe answers "was this listed?",
+    not "was this in the DAX in 2019?".
+11. **No backtester.** The paper engine runs forward through bars; it is not a
+    historical strategy evaluator with walk-forward validation.
+
+---
+
+## Roadmap
+
+| Phase | Focus | Status |
+|---|---|---|
+| 1 | Foundation and deterministic market analysis | ✅ complete |
+| 2 | Data integrity + simulation domain | ✅ complete |
+| 3 | Multi-profile paper-trading engine | ✅ this release |
+| 3b | Real market-data provider integration | planned |
+| 3 | Market scanner | planned |
+| 4 | Backtesting engine | planned |
+| 5 | Spread and execution-cost calibration | planned |
+| 6 | Paper trading | planned |
+| 7 | Machine-learning baseline | planned |
+| 8 | Walk-forward ML evaluation | planned |
+| 9 | Web dashboard | planned |
+| 10 | Alerts and continuous monitoring | planned |
+
+Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.md).
+
+---
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — module boundaries, data flow, key decisions
+- [docs/data-adjustments.md](docs/data-adjustments.md) — corporate actions, raw vs adjusted prices
+- [docs/simulation-design.md](docs/simulation-design.md) — multi-profile simulation and feedback
+- [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps
+- [docs/simulation-timing.md](docs/simulation-timing.md) — execution timing and no-look-ahead rules
+- [docs/roadmap.md](docs/roadmap.md) — phased plan
+- [docs/backtesting.md](docs/backtesting.md) — bias constraints the future engine must satisfy
+- [docs/ml.md](docs/ml.md) — how models will be introduced, and the evaluation rules
+
+---
+
+## Disclaimer
+
+tradabot is a research tool. It does not provide financial advice, and it does not
+execute trades. Markets are adversarial, mostly efficient, and expensive to be wrong
+in. Treat every number this system produces as a hypothesis awaiting falsification.
