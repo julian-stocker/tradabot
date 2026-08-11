@@ -299,7 +299,16 @@ class NotificationService:
             await self._deliver(format_event(event))
             sent.append(key)
 
+        # When portfolio channels are configured, the generic PAPER_TRADE
+        # category has no destination of its own -- paper events route by
+        # portfolio. Attempting it produced a "no webhook configured" failure
+        # and a non-zero exit from a test that had in fact succeeded, which is
+        # exactly the kind of false alarm that teaches an operator to ignore
+        # the command.
         categories = [category] if category is not None else list(EventCategory)
+        if category is None and routing_keys:
+            categories = [c for c in categories if c is not EventCategory.PAPER_TRADE]
+
         for target in categories:
             event = Event(
                 type=EventType.NOTIFICATION_TEST,

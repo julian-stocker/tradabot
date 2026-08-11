@@ -284,3 +284,55 @@ def test_settings_expose_no_portfolio_capital_to_the_router() -> None:
 
     assert not hasattr(settings.discord, "capital")
     assert set(settings.discord.portfolio_webhooks) == set(PORTFOLIO_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# Third-party HTTP logging
+# ---------------------------------------------------------------------------
+def test_http_client_loggers_never_reach_info() -> None:
+    """httpx logs the full request URL at INFO, and for a webhook that URL *is*
+    the credential.
+
+    Found in production: `make notify-test` printed six working webhook URLs to
+    the terminal. tradabot's own redaction cannot help -- the record comes from a
+    third-party logger and never passes through `app/core/redaction.py` -- so the
+    only reliable fix is to stop it being emitted.
+    """
+    import logging
+
+    from app.core.logging import _URL_LOGGING_LIBRARIES, configure_logging
+
+    configure_logging(level="INFO", fmt="console")
+
+    for name in _URL_LOGGING_LIBRARIES:
+        logger = logging.getLogger(name)
+        assert not logger.isEnabledFor(logging.INFO), f"{name} would log request URLs"
+        assert logger.isEnabledFor(logging.WARNING), f"{name} must still report problems"
+
+
+def test_httpx_is_covered_by_name() -> None:
+    """Guard the list itself: httpx is the client tradabot actually uses."""
+    from app.core.logging import _URL_LOGGING_LIBRARIES
+
+    assert "httpx" in _URL_LOGGING_LIBRARIES
+    assert "httpcore" in _URL_LOGGING_LIBRARIES
+
+
+async def test_a_real_delivery_emits_no_url_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """End-to-end: deliver a message and confirm no URL appears in the log."""
+    import logging
+
+    from app.core.logging import configure_logging
+
+    configure_logging(level="INFO", fmt="console")
+    recorder = Recorder()
+    notifier = DiscordWebhookNotifier(make_discord(), client=recorder.client())
+
+    with caplog.at_level(logging.INFO):
+        await notifier.send(message(routing_key="paper-100"))
+
+    captured = caplog.text
+    assert "discord.com/api/webhooks" not in captured
+    assert "p100-tok-bbbb" not in captured

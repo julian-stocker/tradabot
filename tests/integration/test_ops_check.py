@@ -274,14 +274,40 @@ async def test_the_daily_summary_covers_all_three_portfolios(
 async def test_the_test_command_covers_all_six_destinations(
     session: AsyncSession, factory: async_sessionmaker
 ) -> None:
+    """The six real channels, and nothing that has no destination.
+
+    The generic PAPER_TRADE category is skipped when portfolio channels exist:
+    paper events route by portfolio, so attempting it would report a failure for
+    a channel that is not supposed to receive anything.
+    """
     backend = CapturingBackend()
     service = NotificationService(make_settings(), backends=[backend], session_factory=factory)
 
     sent = await service.send_test(routing_keys=PORTFOLIO_KEYS)
 
-    assert set(sent) == set(PORTFOLIO_KEYS) | {c.value for c in EventCategory}
+    assert set(sent) == {
+        "paper-100",
+        "paper-1000",
+        "paper-10000",
+        "market",
+        "performance",
+        "system",
+    }
+    assert "paper_trade" not in sent, "no message to a channel with no destination"
     routed = {m.routing_key for m in backend.messages if m.routing_key}
     assert routed == set(PORTFOLIO_KEYS)
+
+
+async def test_without_portfolio_keys_the_generic_category_is_still_tested(
+    session: AsyncSession, factory: async_sessionmaker
+) -> None:
+    """An installation still using the legacy single channel keeps working."""
+    backend = CapturingBackend()
+    service = NotificationService(make_settings(), backends=[backend], session_factory=factory)
+
+    sent = await service.send_test()
+
+    assert set(sent) == {c.value for c in EventCategory}
 
 
 async def test_test_messages_are_labelled_and_carry_no_secret(

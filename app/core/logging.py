@@ -15,6 +15,15 @@ import structlog
 
 _configured = False
 
+_URL_LOGGING_LIBRARIES = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "aiohttp.client",
+)
+"""HTTP libraries that log full request URLs at INFO. Raised to WARNING because a
+webhook URL is a bearer credential -- see `configure_logging`."""
+
 
 def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
     """Configure structlog and route stdlib logging through it.
@@ -64,6 +73,19 @@ def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
     for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(noisy).handlers.clear()
         logging.getLogger(noisy).propagate = True
+
+    # HTTP clients log the full request URL at INFO. For a Discord webhook the
+    # URL *is* the credential, so `HTTP Request: POST https://discord.com/api/
+    # webhooks/<id>/<token>` writes a working secret into the terminal, into
+    # launchd's log files, and into anything that ships logs onward.
+    #
+    # tradabot's own redaction cannot help here: this record is emitted by a
+    # third-party logger and never passes through `app/core/redaction.py`. The
+    # only reliable fix is to stop the record being produced, so these loggers
+    # are raised to WARNING -- their INFO output is a request-by-request trace
+    # nobody needs, and their warnings and errors still come through.
+    for chatty in _URL_LOGGING_LIBRARIES:
+        logging.getLogger(chatty).setLevel(logging.WARNING)
 
     _configured = True
 

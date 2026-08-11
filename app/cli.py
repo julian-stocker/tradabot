@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, get_settings
 from app.core.events import Event, EventCategory, EventType
@@ -1209,9 +1210,35 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     configure_logging(level=settings.log_level, fmt=settings.log_format)
 
-    # A table rather than a chain of `if`s: argparse has already rejected any
-    # command that is not a key here, so a lookup is exhaustive by construction.
-    return _COMMANDS[args.command](settings, args)
+    try:
+        return _COMMANDS[args.command](settings, args)
+    except OperationalError as exc:
+        # A schema behind the code is an ordinary situation with a one-line fix,
+        # and a two-hundred-line SQLAlchemy traceback buries it. Only missing
+        # tables and columns are translated; anything else re-raises, because a
+        # real database fault should not be dressed up as a migration prompt.
+        missing = _missing_schema_object(exc)
+        if missing is None:
+            raise
+        print(f"\nThe database is missing `{missing}`.", file=sys.stderr)
+        print("The schema is older than the code. Apply the migrations:", file=sys.stderr)
+        print("\n    make migrate\n", file=sys.stderr)
+        print("Then re-run this command.", file=sys.stderr)
+        return 2
+
+
+def _missing_schema_object(exc: OperationalError) -> str | None:
+    """The table or column a database error says is absent, if that is the cause."""
+    message = str(getattr(exc, "orig", exc))
+    for marker in ("no such table: ", "no such column: ", "does not exist"):
+        if marker in message:
+            fragment = (
+                message.rsplit(marker, maxsplit=1)[-1].strip()
+                if marker != "does not exist"
+                else message
+            )
+            return fragment.split()[0].strip("\"'")
+    return None
 
 
 if __name__ == "__main__":

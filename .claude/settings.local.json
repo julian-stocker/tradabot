@@ -124,7 +124,10 @@
       "Bash(.venv/bin/pytest tests/unit/test_portfolio_routing.py -q)",
       "Bash(.venv/bin/pytest tests/integration/test_portfolio_isolation.py -q)",
       "Bash(.venv/bin/pytest tests/unit/test_ops_launchd.py -q)",
-      "Bash(grep -cE \"^TRADABOT_DISCORD__PAPER_\\(100|1000|10000\\)_WEBHOOK=$\" .env.example)"
+      "Bash(grep -cE \"^TRADABOT_DISCORD__PAPER_\\(100|1000|10000\\)_WEBHOOK=$\" .env.example)",
+      "Bash(.venv/bin/pytest tests/integration/test_ops_check.py -q)",
+      "Bash(TRADABOT_DATABASE_URL=sqlite+aiosqlite:///__TRACKED_VAR__/yours.db .venv/bin/python -m app.cli scanner run-once)",
+      "Bash(make notify-test *)"
     ]
   }
 }
