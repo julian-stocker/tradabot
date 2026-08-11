@@ -142,6 +142,9 @@ make dev              # start the API with autoreload
 | `make quote s=NVDA` | Fetch one latest quote |
 | `make simulate s=NVDA from=... to=...` | Replay imported real candles through the paper broker |
 | `make smoke-real-data` | Opt-in live-provider smoke test (needs credentials) |
+| `make notify-test` | Send a labelled TEST notification to every configured channel |
+| `make notify-status` | Notification configuration and delivery outcomes |
+| `make daily-summary` | Build and send the daily portfolio report |
 | `make up` / `make down` | Start / stop the Docker stack |
 | `make clean` | Remove caches and build artefacts |
 
@@ -213,6 +216,7 @@ All under the `/api/v1` prefix. Interactive docs at `/docs`, schema at
 |---|---|---|
 | `GET` | `/health` | Liveness + database connectivity |
 | `GET` | `/health/market-data` | Provider configuration and data freshness (credential-free) |
+| `GET` | `/health/notifications` | Notification delivery status (never exposes a webhook) |
 | `GET` | `/api/v1/instruments` | List instruments (filter by exchange, asset type) |
 | `GET` | `/api/v1/instruments/{symbol}` | Instrument detail |
 | `GET` | `/api/v1/instruments/{symbol}/candles` | OHLCV in a time window |
@@ -266,9 +270,13 @@ These are known and deliberate, not oversights:
 10. **Historical spreads are assumed, not measured.** Bars carry no quote, so a
     replay applies the configured spread symmetrically. A real spread widens
     exactly when it matters most, and this one does not.
-11. **Lifecycle, not index membership.** The universe answers "was this listed?",
+11. **Notification delivery is at-most-once.** A failed alert is recorded but not
+    automatically resent; a failed *signal* alert is retried by the next
+    evaluation, a failed system alert is not. No transactional outbox — see
+    [docs/notifications.md](docs/notifications.md).
+12. **Lifecycle, not index membership.** The universe answers "was this listed?",
     not "was this in the DAX in 2019?".
-12. **No backtester.** The paper engine runs forward through bars; it is not a
+13. **No backtester.** The paper engine runs forward through bars; it is not a
     historical strategy evaluator with walk-forward validation.
 
 ---
@@ -280,8 +288,8 @@ These are known and deliberate, not oversights:
 | 1 | Foundation and deterministic market analysis | ✅ complete |
 | 2 | Data integrity + simulation domain | ✅ complete |
 | 3 | Multi-profile paper-trading engine | ✅ complete |
-| 3b | Real market-data provider integration | ✅ this release |
-| 3.5 | Discord notification infrastructure | planned |
+| 3b | Real market-data provider integration | ✅ complete |
+| 3.5 | Discord notification infrastructure | ✅ this release |
 | 4 | Market scanner | planned |
 | 5 | Backtesting engine | planned |
 | 6 | Spread and execution-cost calibration | planned |
@@ -300,6 +308,8 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 - [docs/market-data.md](docs/market-data.md) — real data ingestion, calendars, quotes, scheduling
 - [docs/providers/alpaca.md](docs/providers/alpaca.md) — the Alpaca integration, feeds, retries, credentials
 - [docs/data-quality.md](docs/data-quality.md) — validation rules, gaps, and why nothing is repaired
+- [docs/notifications.md](docs/notifications.md) — event routing, thresholds, and database-vs-Discord
+- [docs/discord.md](docs/discord.md) — channels, webhook security, retries, message limits
 - [docs/data-adjustments.md](docs/data-adjustments.md) — corporate actions, raw vs adjusted prices
 - [docs/simulation-design.md](docs/simulation-design.md) — multi-profile simulation and feedback
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps

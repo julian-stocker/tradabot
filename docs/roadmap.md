@@ -153,9 +153,9 @@ makes one possible.
 
 ---
 
-## Phase 3.5 — Discord notification infrastructure
+## Phase 3.5 — Discord notification infrastructure ✅
 
-**Entry:** phase 3b. Recommended next, and small.
+**Entry:** phase 3b.
 
 The event boundary already exists: `app/core/events.py` defines the event types,
 the `EventPublisher` protocol and a null implementation, and ingestion already
@@ -169,37 +169,66 @@ emits through it. Nothing delivers anything yet.
 - Rate limiting and coalescing, so one bad night does not produce 400 messages
 - Webhook URL from the environment, treated as a credential
 
-**Exit**
-- A failed sync produces one legible message
-- Turning the transport off is configuration, not code
-- No provider module imports anything Discord-shaped
+**Delivered:** a provider-independent notification layer with Discord as its first
+backend. `NotificationService` implements the existing `EventPublisher`, so no
+domain service changed. Four channels routed by event category; transition-based
+deduplication with configurable thresholds and cooldowns; bounded retry with
+jitter and `Retry-After`; a persisted attempt audit; a credential-free health
+endpoint; CLI `test` / `status` / `daily-summary`; and a console backend that
+shares the formatters so the whole path is exercisable offline.
 
-**Why before the scanner:** a scanner that runs unattended needs somewhere to
-report, and the alternative — discovering failures by reading logs the next
-morning — makes every later phase slower to debug. It is also the cheapest phase
-on this list, because the seam it plugs into was built in 3b.
+**Reliability, stated plainly:** at-most-once with an audit trail, **not** a
+transactional outbox. An outbox needs a relay process, and scheduling is deferred
+to the deployment environment by design. A failed *signal* alert is retried by
+the next evaluation (its "announced" state is only committed on success); a
+failed *system* alert is not. `docs/notifications.md` says exactly this rather
+than implying a stronger guarantee.
+
+**The constraint that outranks everything else here:** notification filtering
+never affects persistence. A score-60 signal is never announced and is always
+stored, and its forward outcome stays measurable. The database is the future ML
+dataset, and shaping it by "what was worth posting to a chat channel" would bake
+in a selection bias that later looks like signal.
+
+**Not delivered, deliberately:** slash commands, an interactive bot, or any path
+by which Discord could influence a decision. Discord is where tradabot writes what
+it decided.
 
 ---
 
-## Phase 4 — Market scanner
+## Phase 4 — Continuous watchlist scanner and signal lifecycle
 
-**Entry:** phase 3b — scanning synthetic data is theatre.
+**Entry:** phase 3.5 — a scanner that runs unattended needs somewhere to report,
+and that now exists.
+
+The next phase, and the one that finally produces a dataset. Continuous
+evaluation of **real** market data on a schedule, persisting every candidate it
+evaluates and notifying only the high-value transitions the notification policy
+already knows how to identify.
 
 **Scope**
-- Batch evaluation across the universe (`ScanRequest` / `ScanResult` already defined)
-- Filtering by score, classification, confidence, and **positive net edge**
-- Ranking, and persistence of scan results for later evaluation
-- Incremental computation so a full-universe scan is not a full recompute
+- Scheduled evaluation across the configured watchlist (`ScanRequest` /
+  `ScanResult` are already defined)
+- **Persist every evaluated candidate**, not only the qualifying ones — this is
+  the whole point, and the reason it is worth doing before the backtester
+- Signal lifecycle tracking: when a candidate qualified, strengthened, lapsed,
+  and what happened afterwards
+- Feed `MarketOverview` with real top-N candidates; the formatter exists and is
+  currently given nothing
+- Incremental computation so a repeat scan is not a full recompute
 
 **Exit**
-- Full universe scans within an acceptable local time budget
+- A watchlist scan completes within an acceptable local time budget
 - Every result reports `instruments_scanned` and `hit_rate`
+- Discord volume stays legible over a full trading day — which is what the
+  phase 3.5 thresholds exist to be tested against
 
-**Hazard, stated up front:** scanning 500 instruments for "score > 55" is a
-multiple-comparisons trap. At any plausible false-positive rate it returns hits every
-day regardless of whether the signal predicts anything. The base-rate fields are
-mandatory for this reason, and scan results must be stored so their forward performance
-can be measured in phase 5.
+**Hazard, stated up front:** scanning many instruments for "score > 75" is a
+multiple-comparisons trap. At any plausible false-positive rate it returns hits
+every day regardless of whether the signal predicts anything. The base-rate
+fields are mandatory for this reason, and every scan result must be stored so its
+forward performance can be measured in phase 5. **A busy Discord channel is not
+evidence of a working strategy** — it is evidence of a threshold.
 
 ---
 

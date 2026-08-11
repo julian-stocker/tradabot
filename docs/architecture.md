@@ -260,7 +260,38 @@ and the daily-loss budget (a *session*, not a UTC day). pandas is contained
 inside the wrapper -- `session_containing` returns a plain `date`, so the
 dependency does not leak into the domain.
 
-### 14. UTC everywhere, enforced at the type level
+### 14. Notifications are a subscriber, never a caller
+
+`NotificationService` implements the existing `EventPublisher` protocol. That is
+the entire integration: a domain service that already published events gains
+Discord delivery by being handed a different publisher at the composition root.
+
+The alternative -- calling a webhook from inside the paper engine -- would put
+network I/O, retry policy and a second set of credentials inside a class whose
+job is booking trades, make the engine untestable without stubbing a notifier,
+and let a Discord outage roll back a trade. Instead:
+
+* business code publishes **facts** (`PaperTradeClosed`), never commands
+  (`send_discord(...)`);
+* `publish()` catches everything, so no delivery failure can reach a caller;
+* delivery happens **after** the business transaction commits, because announcing
+  a trade that then rolls back is worse than not announcing one that did.
+
+The reliability model is at-most-once with an audit trail, not a transactional
+outbox, and [notifications.md](notifications.md) says so explicitly rather than
+implying a stronger guarantee.
+
+### 15. Notification filtering must not shape the dataset
+
+Thresholds, cooldowns and deduplication control **message volume only**. Every
+signal is computed, scored and persisted regardless of whether it is announced.
+
+This is a hard constraint rather than a preference: the database is what a future
+ML phase trains on, and a dataset filtered by "what was interesting enough to
+post to a chat channel" would carry a selection bias that is impossible to
+correct for afterwards -- and that would look, in evaluation, like signal.
+
+### 16. UTC everywhere, enforced at the type level
 
 `ensure_utc` **rejects naive datetimes** rather than assuming UTC. Guessing is how
 off-by-one-session bugs get into backtests. The `UTCDateTime` column type normalises
@@ -352,7 +383,9 @@ deliberately:
 * `.env.example` carries empty placeholders only.
 
 `app/core/redaction.py` masks credential-shaped text at every outward boundary
-(log line, event payload, HTTP response). That is **defence in depth against a
+(log line, event payload, HTTP response, notification audit row). Discord webhook
+URLs are included: a webhook is a bearer credential, and HTTP clients routinely
+echo the request URL into their exception strings. That is **defence in depth against a
 third-party SDK echoing request context into its own error strings** -- not the
 primary control, which is not putting secrets in strings at all. It is
 pattern-based and therefore incomplete.

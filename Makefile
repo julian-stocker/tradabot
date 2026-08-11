@@ -6,7 +6,7 @@
 .PHONY: help install dev test test-cov lint format format-check typecheck check \
         migrate migration downgrade seed seed-profiles demo-simulation signal \
         market-data-status market-data-import market-data-sync quote simulate \
-        smoke-real-data up down logs clean
+        smoke-real-data notify-test notify-status daily-summary up down logs clean
 
 PYTHON ?= python3.12
 VENV   := .venv
@@ -92,6 +92,15 @@ simulate: ## Replay imported real candles: make simulate s=NVDA from=2024-01-01 
 
 smoke-real-data: ## Opt-in smoke test against the live provider (needs credentials)
 	TRADABOT_RUN_EXTERNAL_TESTS=1 $(BIN)/pytest tests/external -v
+
+notify-test: ## Send a TEST notification to every configured channel
+	$(BIN)/python -m app.cli notifications test
+
+notify-status: ## Show notification configuration and delivery outcomes
+	$(BIN)/python -m app.cli notifications status
+
+daily-summary: ## Build and send the daily portfolio report
+	$(BIN)/python -m app.cli notifications daily-summary
 
 up: ## Start the Docker stack
 	docker compose up --build -d

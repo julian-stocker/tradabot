@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
+from app.core.events import Event, EventCategory
 from app.core.logging import configure_logging
 from app.core.time import utc_now
 from app.corporate_actions.repository import CorporateActionRepository
@@ -29,6 +30,9 @@ from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
+from app.notifications.repository import NotificationRepository
+from app.notifications.service import NotificationService
+from app.notifications.summary import build_daily_summary
 from app.paper.demo import run_demo
 from app.paper.performance import PerformanceSummary
 from app.paper.replay import REPLAY_DISCLAIMER, ReplayError, replay_symbol
@@ -334,6 +338,94 @@ def _format_summary(summary: PerformanceSummary) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+async def _notifications_test(settings: Settings, category: str | None) -> int:
+    """Send a clearly-labelled test message to each configured channel.
+
+    Sends real messages to real channels, so it says which ones before doing it.
+    The payload contains a channel name and an environment name -- nothing that
+    is a credential.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        service = NotificationService(settings, session_factory=factory)
+        if not service.enabled:
+            print("\nNotifications are disabled or no backend is configured.")
+            print("Set TRADABOT_DISCORD__ENABLED=true and at least one webhook,")
+            print("or TRADABOT_NOTIFICATIONS__CONSOLE=true to print them locally.")
+            return 1
+
+        target = EventCategory(category) if category else None
+        print(f"\nbackends: {', '.join(service.backend_names)}")
+        print(f"channels: {', '.join(sorted(settings.discord.configured_categories)) or '(none)'}")
+        sent = await service.send_test(target)
+        print(f"sent test messages to: {', '.join(sent)}")
+        if service.last_error:
+            print(f"last error: {service.last_error}")
+            return 1
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _notifications_daily_summary(settings: Settings) -> int:
+    """Build and send the daily portfolio report.
+
+    A plain callable with no scheduler attached (Part L). Cron, a systemd timer
+    or a future in-process scheduler all invoke the same command, and none of
+    the business logic knows which.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            payload = await build_daily_summary(session)
+
+        service = NotificationService(settings, session_factory=factory)
+        await service.publish(Event.daily_summary(payload))
+
+        print(f"\nportfolios summarised: {len(payload.get('portfolios', []))}")
+        print(f"backends: {', '.join(service.backend_names) or '(none)'}")
+        if not service.enabled:
+            print("notifications are disabled; nothing was delivered")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _notifications_status(settings: Settings) -> int:
+    """Print delivery configuration and recent outcomes. Never prints a webhook."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        service = NotificationService(settings, session_factory=factory)
+        async with session_scope(factory) as session:
+            repository = NotificationRepository(session)
+            counts = await repository.counts_by_status()
+            last_success, last_failure = await repository.last_outcome()
+
+        print(f"\nenabled       : {service.enabled}")
+        print(f"backends      : {', '.join(service.backend_names) or '(none)'}")
+        print(
+            f"channels      : "
+            f"{', '.join(sorted(settings.discord.configured_categories)) or '(none configured)'}"
+        )
+        print(f"signal thresh : {settings.notifications.signal_threshold}")
+        print(f"strong thresh : {settings.notifications.strong_signal_threshold}")
+        print(f"cooldown      : {settings.notifications.signal_cooldown_minutes} min")
+        print(f"delivered     : {counts.get('delivered', 0)}")
+        print(f"failed        : {counts.get('failed', 0)}")
+        print(f"skipped       : {counts.get('skipped', 0)}")
+        print(f"last success  : {last_success.isoformat() if last_success else '(never)'}")
+        print(f"last failure  : {last_failure.isoformat() if last_failure else '(never)'}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
 async def _create_tables(settings: Settings) -> int:
     """Create tables directly from metadata.
 
@@ -391,6 +483,16 @@ def _run_market_data(settings: Settings, args: argparse.Namespace) -> int:
     return asyncio.run(_market_data_quote(settings, args.symbol.upper()))
 
 
+def _run_notifications(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``notifications`` subcommand."""
+    command = args.notification_command
+    if command == "status":
+        return asyncio.run(_notifications_status(settings))
+    if command == "daily-summary":
+        return asyncio.run(_notifications_daily_summary(settings))
+    return asyncio.run(_notifications_test(settings, args.category))
+
+
 _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
@@ -412,6 +514,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
         )
     ),
     "market-data": _run_market_data,
+    "notifications": _run_notifications,
 }
 
 
@@ -441,6 +544,15 @@ def main(argv: list[str] | None = None) -> int:
         "--timeframe", default=Timeframe.D1.value, choices=[t.value for t in Timeframe]
     )
     simulate.add_argument("--horizon", default=Horizon.D5.value, choices=[h.value for h in Horizon])
+
+    notify = sub.add_parser("notifications", help="Notification delivery")
+    notify_sub = notify.add_subparsers(dest="notification_command", required=True)
+    notify_sub.add_parser("status", help="Show configuration and delivery outcomes")
+    tester = notify_sub.add_parser("test", help="Send a labelled TEST message to each channel")
+    tester.add_argument(
+        "--category", choices=[c.value for c in EventCategory], help="Limit to one channel"
+    )
+    notify_sub.add_parser("daily-summary", help="Build and send the daily portfolio report")
 
     market = sub.add_parser("market-data", help="Market-data provider operations")
     market_sub = market.add_subparsers(dest="market_command", required=True)

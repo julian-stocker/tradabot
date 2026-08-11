@@ -87,6 +87,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Every formatter takes (event, payload) so one dispatch table can call them all.
+# Most read only the payload; a signature that varied per formatter would push
+# the branching into the dispatcher, which is worse.
+"app/notifications/formatters.py" = ["ARG001"]
 # Local imports inside tests keep each test self-contained and readable.
 "tests/**" = ["ANN", "PLR2004", "ARG001", "ARG002", "PLC0415"]
 # `dialect` is part of the SQLAlchemy TypeDecorator contract, unused or not.

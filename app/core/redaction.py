@@ -36,10 +36,18 @@ _KEYED: Final = (
 # Alpaca keys look like PK... / AK..., masked wherever they appear even unlabelled.
 _KEY_SHAPED: Final = re.compile(r"\b[AP]K[A-Z0-9]{10,}\b")
 
+# A webhook URL is a bearer credential: whoever holds it can post as tradabot.
+# The whole URL is masked, not just the token, because the id identifies the
+# channel and there is no part of it an error message needs. HTTP clients put
+# the request URL into their exception strings, so this fires more often than
+# it looks like it would.
+_WEBHOOK_URL: Final = re.compile(r"https?://\S*?/webhooks?/\S*", re.IGNORECASE)
+
 
 def redact(text: str) -> str:
     """Mask values that look like credentials."""
-    redacted = _AUTHORIZATION.sub(rf"\1{MASK}", text)
+    redacted = _WEBHOOK_URL.sub(MASK, text)
+    redacted = _AUTHORIZATION.sub(rf"\1{MASK}", redacted)
     for pattern in _KEYED:
         redacted = pattern.sub(rf"\1{MASK}", redacted)
     return _KEY_SHAPED.sub(MASK, redacted)

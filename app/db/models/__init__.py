@@ -7,6 +7,7 @@ autogenerate and ``create_all`` both rely on.
 from app.db.models.candle import Candle
 from app.db.models.corporate_action import CorporateActionRow
 from app.db.models.instrument import Instrument
+from app.db.models.notification import NotificationAttempt, NotificationState
 from app.db.models.paper import (
     DecisionOutcome,
     PortfolioSnapshot,
@@ -25,6 +26,8 @@ __all__ = [
     "CorporateActionRow",
     "DecisionOutcome",
     "Instrument",
+    "NotificationAttempt",
+    "NotificationState",
     "PortfolioSnapshot",
     "RiskProfile",
     "SignalRow",

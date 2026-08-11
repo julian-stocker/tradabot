@@ -11,10 +11,13 @@ from app.api.errors import register_exception_handlers
 from app.api.router import api_router
 from app.api.routes.health import router as health_router
 from app.api.routes.market_data import router as market_data_health_router
+from app.api.routes.notifications import router as notifications_health_router
 from app.core.config import Settings, get_settings
+from app.core.events import Event
 from app.core.logging import configure_logging, get_logger
 from app.db.session import create_engine, create_session_factory
 from app.market_data.registry import build_provider
+from app.notifications.service import NotificationService
 
 logger = get_logger(__name__)
 
@@ -46,19 +49,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Create long-lived resources once, dispose them on shutdown."""
         engine = create_engine(settings)
+        session_factory = create_session_factory(engine)
         app.state.settings = settings
         app.state.engine = engine
-        app.state.session_factory = create_session_factory(engine)
+        app.state.session_factory = session_factory
         app.state.provider = build_provider(settings)
+
+        # The composition root, and the only place notifications are wired in.
+        # Domain services publish events; which publisher they got is decided
+        # here, so turning Discord off is a configuration change and not a code
+        # path through the trading engine.
+        notifications = NotificationService(settings, session_factory=session_factory)
+        app.state.notifications = notifications
 
         logger.info(
             "tradabot starting",
             environment=settings.env.value,
             provider=settings.market_data_provider,
+            notification_backends=",".join(notifications.backend_names) or "none",
+        )
+        await notifications.publish(
+            Event.lifecycle(
+                started=True,
+                environment=settings.env.value,
+                provider=settings.market_data_provider,
+            )
         )
         try:
             yield
         finally:
+            # Announced before disposing the engine: the audit row needs a
+            # working session, and a "stopped" message nobody can record is of
+            # limited use during an incident.
+            await notifications.publish(
+                Event.lifecycle(
+                    started=False,
+                    environment=settings.env.value,
+                    provider=settings.market_data_provider,
+                )
+            )
             await engine.dispose()
             logger.info("tradabot stopped")
 
@@ -75,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_exception_handlers(app)
     app.include_router(health_router)
     app.include_router(market_data_health_router)
+    app.include_router(notifications_health_router)
     app.include_router(api_router, prefix=settings.api_prefix)
     return app
 

@@ -164,6 +164,131 @@ class MarketDataSettings(BaseModel):
         return value
 
 
+class DiscordSettings(BaseModel):
+    """Discord webhook delivery.
+
+    Four webhooks, one per channel, because Discord scopes a webhook to a
+    channel. They are **secrets**: a webhook URL is a bearer credential -- anyone
+    holding one can post to that channel -- so they are `SecretStr`, never
+    logged, never returned by an endpoint, and never written to `.env.example`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Off by default. tradabot must run, test and demo with no Discord "
+            "server anywhere; delivery is monitoring, not a dependency."
+        ),
+    )
+
+    market_webhook: SecretStr = Field(default=SecretStr(""), description="#market-signals.")
+    trades_webhook: SecretStr = Field(default=SecretStr(""), description="#paper-trades.")
+    performance_webhook: SecretStr = Field(default=SecretStr(""), description="#performance.")
+    system_webhook: SecretStr = Field(default=SecretStr(""), description="#tradabot-system.")
+
+    request_timeout_seconds: float = Field(default=10.0, gt=0)
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Bounded. A notification is worth retrying, never worth hanging for.",
+    )
+    backoff_base_seconds: float = Field(default=0.5, gt=0)
+    backoff_max_seconds: float = Field(default=15.0, gt=0)
+
+    username: str = Field(default="tradabot", description="Display name on posted messages.")
+
+    @property
+    def configured_categories(self) -> frozenset[str]:
+        """Categories with a webhook set. Never reveals the values."""
+        return frozenset(
+            name
+            for name, secret in (
+                ("market", self.market_webhook),
+                ("paper_trade", self.trades_webhook),
+                ("performance", self.performance_webhook),
+                ("system", self.system_webhook),
+            )
+            if secret.get_secret_value().strip()
+        )
+
+    @property
+    def is_configured(self) -> bool:
+        """Whether at least one channel can be delivered to."""
+        return bool(self.configured_categories)
+
+
+class NotificationSettings(BaseModel):
+    """When an event is worth telling a human about.
+
+    **These thresholds control notification volume, nothing else.** A signal that
+    fails to clear them is still computed, still scored and still persisted --
+    see docs/notifications.md. Filtering what reaches Discord must never filter
+    what reaches the database, because the database is the future ML dataset.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = Field(default=True, description="Master switch for all backends.")
+    console: bool = Field(
+        default=False,
+        description="Echo notifications to the log. Useful locally; independent of Discord.",
+    )
+
+    signal_threshold: float = Field(
+        default=75.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Score at or above which a signal is worth announcing. An engineering "
+            "default chosen to keep volume low -- NOT a claim that 75 is "
+            "meaningful. Nothing in the scoring model treats it as special."
+        ),
+    )
+    strong_signal_threshold: float = Field(
+        default=85.0, ge=0.0, le=100.0, description="Above this, an upgrade is announced."
+    )
+    signal_cooldown_minutes: int = Field(
+        default=60,
+        ge=0,
+        description="Minimum gap between notifications about the same subject.",
+    )
+    minimum_score_change: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "A re-notification needs at least this much movement. Without it, a "
+            "score oscillating around a threshold notifies on every scan."
+        ),
+    )
+
+    overview_size: int = Field(
+        default=5, ge=1, le=25, description="Opportunities in a market overview."
+    )
+    max_message_characters: int = Field(
+        default=1900,
+        ge=200,
+        le=2000,
+        description=(
+            "Discord's hard limit is 2000. The margin absorbs the wrapper so a "
+            "long list of reasons truncates rather than failing delivery."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _thresholds_ordered(self) -> NotificationSettings:
+        if self.strong_signal_threshold < self.signal_threshold:
+            msg = (
+                f"strong_signal_threshold ({self.strong_signal_threshold}) must be at "
+                f"least signal_threshold ({self.signal_threshold}); otherwise a signal "
+                f"would be 'strong' before it qualified at all"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class SignalWeights(BaseModel):
     """Weights of the baseline scoring components.
 
@@ -288,6 +413,10 @@ class Settings(BaseSettings):
     # --- Domain assumptions ----------------------------------------------
     costs: CostSettings = Field(default_factory=CostSettings)
     signals: SignalSettings = Field(default_factory=SignalSettings)
+
+    # --- Notifications ----------------------------------------------------
+    notifications: NotificationSettings = Field(default_factory=NotificationSettings)
+    discord: DiscordSettings = Field(default_factory=DiscordSettings)
 
     @field_validator("database_url")
     @classmethod
