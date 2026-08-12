@@ -445,6 +445,91 @@ class MarketDataImportService:
                 )
             report.reports.append(item)
 
+    async def import_batch(
+        self,
+        *,
+        symbols: Sequence[str],
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[ImportReport]:
+        """One batched request for an **explicit** window, then persist per symbol.
+
+        The difference from :meth:`_sync_batched` is who chooses the window.
+        ``_sync_batched`` derives it from what is already stored, which is right
+        for keeping current but wrong for backfilling: a historical expansion
+        must be able to ask for a window that sits entirely *behind* the stored
+        frontier.
+
+        One request for fifty-two symbols instead of fifty-two requests is the
+        whole reason a multi-year expansion is practical -- per-symbol it would
+        be some six thousand round trips.
+        """
+        wanted = [symbol.upper() for symbol in symbols]
+        start, end = ensure_utc(start), ensure_utc(end)
+        instruments: dict[str, int] = {}
+        reports: list[ImportReport] = []
+
+        for symbol in wanted:
+            instrument = await self._instruments.get_by_symbol(symbol)
+            if instrument is None:
+                reports.append(
+                    _failed_report(
+                        symbol,
+                        timeframe,
+                        start,
+                        self._provider.name,
+                        f"{symbol} is not in the instrument table",
+                    )
+                )
+                continue
+            instruments[symbol] = instrument.id
+
+        if not instruments:
+            return reports
+
+        batch_provider = getattr(self._provider, "get_historical_candles_batch", None)
+        if batch_provider is None:  # pragma: no cover -- every shipped provider batches
+            msg = f"provider {self._provider.name} cannot batch"
+            raise ProviderError(msg)
+
+        try:
+            batches = await batch_provider(list(instruments), timeframe, start, end)
+        except ProviderError as exc:
+            message = safe_message(exc)
+            logger.warning(
+                "batched backfill failed",
+                timeframe=timeframe.value,
+                start=start.isoformat(),
+                error=message,
+            )
+            for symbol in instruments:
+                reports.append(
+                    _failed_report(symbol, timeframe, start, self._provider.name, message)
+                )
+            return reports
+
+        for symbol, instrument_id in instruments.items():
+            candles = batches.get(symbol, [])
+            item = ImportReport(
+                symbol=symbol,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                provider=self._provider.name,
+                received_bars=len(candles),
+            )
+            if candles:
+                item.inserted_bars = await self._candles.upsert_many(
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    candles=candles,
+                    provider=self._provider.name,
+                )
+            reports.append(item)
+
+        return reports
+
     async def _finish_sync(
         self, report: SyncReport, *, started: datetime, now: datetime | None
     ) -> SyncReport:

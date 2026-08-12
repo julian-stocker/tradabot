@@ -273,3 +273,46 @@ def test_cost_basis_is_always_modelled_for_history() -> None:
     """Historical quotes do not exist, so no historical cost was ever observed."""
     assert CostBasis.MODELLED.value == "MODELLED"
     assert CostBasis.OBSERVED is not CostBasis.MODELLED
+
+
+# ---------------------------------------------------------------------------
+# Solvency
+# ---------------------------------------------------------------------------
+def test_a_wiped_out_account_stops_trading() -> None:
+    """**Ruin is terminal.**
+
+    An unleveraged cash account cannot trade its way out of zero. Letting the
+    simulation continue produces negative equity, which is not a bad result but
+    an impossible one -- the first 100 EUR benchmark finished at -4.02 EUR
+    because a flat exit fee was charged against cash that no longer existed.
+    """
+    state = PortfolioState.start(profiles()["paper-100"])  # type: ignore[arg-type]
+    state.equity = Decimal(0)
+    state.cash = Decimal(0)
+
+    trade = simulate_entry(
+        evaluation=FakeEvaluation(),  # type: ignore[arg-type]
+        state=state,
+        entry_bar=entry_bar(),  # type: ignore[arg-type]
+        future_bars=rising_bars(),  # type: ignore[arg-type]
+        session=SessionPhase.REGULAR,
+    )
+
+    assert not trade.executed
+    assert trade.rejection_reason == "ACCOUNT_RUINED"
+
+
+def test_a_negative_balance_also_stops_trading() -> None:
+    state = PortfolioState.start(profiles()["paper-100"])  # type: ignore[arg-type]
+    state.equity = Decimal("-4.02")
+
+    trade = simulate_entry(
+        evaluation=FakeEvaluation(),  # type: ignore[arg-type]
+        state=state,
+        entry_bar=entry_bar(),  # type: ignore[arg-type]
+        future_bars=rising_bars(),  # type: ignore[arg-type]
+        session=SessionPhase.REGULAR,
+    )
+
+    assert not trade.executed
+    assert trade.rejection_reason == "ACCOUNT_RUINED"

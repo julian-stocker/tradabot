@@ -140,6 +140,23 @@ class CandleRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def earliest_timestamp(
+        self, *, instrument_id: int, timeframe: Timeframe
+    ) -> datetime | None:
+        """Timestamp of the oldest stored bar.
+
+        The resume frontier for a *backfill*, which extends history backwards --
+        the mirror of :meth:`latest_timestamp`, which is the frontier for keeping
+        current.
+        """
+        stmt = (
+            select(Candle.timestamp)
+            .where(Candle.instrument_id == instrument_id, Candle.timeframe == timeframe)
+            .order_by(Candle.timestamp)
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def count(self, *, instrument_id: int, timeframe: Timeframe) -> int:
         stmt = select(Candle.timestamp).where(
             Candle.instrument_id == instrument_id, Candle.timeframe == timeframe

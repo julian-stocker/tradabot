@@ -155,6 +155,8 @@ make dev              # start the API with autoreload
 | `make ops-check` | Validate this installation can run unattended |
 | `make ops-install` / `ops-start` | Write launchd templates / start the schedule |
 | `make ops-status` / `ops-stop` / `ops-uninstall` | Inspect / stop / remove |
+| `make storage-plan FROM=… TO=…` | Project the disk cost of a historical expansion |
+| `make history-plan` / `make history FROM=… TO=…` | Report / run a resumable historical backfill |
 | `make backtest FROM=… TO=…` | Replay history through the production scanner |
 | `make backtest-status` / `backtest-report RUN=id` | Recent runs / one run's full metadata |
 | `make outcomes` / `outcomes-status` | Compute outcome labels / label counts |
@@ -286,9 +288,10 @@ These are known and deliberate, not oversights:
 6. **Every historical transaction cost is modelled, never observed.** No
    historical quotes are stored, so backtested costs are a versioned assumption
    labelled `MODELLED`. See [docs/data-quality.md](docs/data-quality.md).
-7. **Deep intraday history is weeks, not years.** A production-faithful replay
-   needs all four timeframes and is currently limited to ~15 sessions. See
-   [docs/research-dataset.md](docs/research-dataset.md).
+7. **Provider history is a rolling ~6-year window.** Alpaca serves this
+   account back to 2020-07-27 and no further, and that floor advances daily.
+   Bars that age out are gone for good, which is why raw candles are treated as
+   irreplaceable. See [docs/historical-expansion.md](docs/historical-expansion.md).
 5. **No backtester.** Only the data structures and protocols exist. Any claim about
    historical performance is currently unsupported.
 6. **No machine learning.** By design — see [docs/ml.md](docs/ml.md).
@@ -359,6 +362,8 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps
 - [docs/simulation-timing.md](docs/simulation-timing.md) — execution timing and no-look-ahead rules
 - [docs/roadmap.md](docs/roadmap.md) — phased plan
+- [docs/storage-planning.md](docs/storage-planning.md) — measured bytes/row, growth projections, SQLite limits
+- [docs/historical-expansion.md](docs/historical-expansion.md) — provider depth, chunking, resume, gap classification
 - [docs/backtesting.md](docs/backtesting.md) — the replay engine, execution convention, bias constraints
 - [docs/outcome-labels.md](docs/outcome-labels.md) — horizons, MFE/MAE, barriers, same-bar ambiguity
 - [docs/research-dataset.md](docs/research-dataset.md) — the exported dataset, columns, sampling policy

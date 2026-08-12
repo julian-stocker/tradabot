@@ -179,6 +179,17 @@ research-features: ## Feature values against outcomes
 research-export: ## Write a versioned research dataset and manifest
 	$(BIN)/python -m app.cli research export --horizon $(or $(HORIZON),1d) --out exports
 
+storage-plan: ## Project disk cost of an expansion (FROM=YYYY-MM-DD TO=YYYY-MM-DD)
+	$(BIN)/python -m app.cli research storage-plan --from $(FROM) --to $(TO) --universe active
+
+history: ## Expand stored history (FROM=... TO=... [TIMEFRAMES=5m,15m,1h,1d])
+	TRADABOT_ALPACA__REQUEST_TIMEOUT_SECONDS=120 $(BIN)/python -m app.cli history \
+		--from $(FROM) --to $(TO) --universe active \
+		--timeframes $(or $(TIMEFRAMES),5m,15m,1h,1d)
+
+history-plan: ## Report what a historical expansion would do, and download nothing
+	$(BIN)/python -m app.cli history --from $(FROM) --to $(TO) --universe active --dry-run
+
 up: ## Start the Docker stack
 	docker compose up --build -d
 

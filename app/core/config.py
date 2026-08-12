@@ -120,7 +120,17 @@ class AlpacaSettings(BaseModel):
     )
     backoff_base_seconds: float = Field(default=0.5, gt=0)
     backoff_max_seconds: float = Field(default=30.0, gt=0)
-    max_bars_per_request: int = Field(default=10_000, ge=1, le=10_000)
+    max_bars_per_request: int = Field(
+        default=10_000,
+        ge=1,
+        le=10_000,
+        description=(
+            "Retained for reference only. It is deliberately NOT sent to Alpaca: "
+            "the API applies a bar limit across the whole response and honours it "
+            "by dropping symbols entirely, so a batched request silently returns "
+            "a subset of the universe. Requests are bounded by date range instead."
+        ),
+    )
     max_symbols_per_request: int = Field(
         default=100,
         ge=1,

@@ -67,6 +67,8 @@ class PortfolioResult:
     max_drawdown: Decimal = Decimal(0)
     holding_seconds: list[float] = field(default_factory=list)
     rejection_reasons: dict[str, int] = field(default_factory=dict)
+    ruined: bool = False
+    """Equity reached zero: the account was wiped out, not merely unprofitable."""
 
     @property
     def win_rate(self) -> float | None:
@@ -100,6 +102,7 @@ class PortfolioResult:
             "net_return": self.net_return,
             "max_drawdown": float(self.max_drawdown),
             "average_holding_hours": self.average_holding_hours,
+            "ruined": self.ruined,
             "rejection_reasons": dict(sorted(self.rejection_reasons.items())),
         }
 
@@ -263,13 +266,17 @@ async def _simulate_one(
                 )
             )
 
+    # Floor terminal equity at zero. A cash account cannot owe money, so a
+    # slightly negative figure is a modelling artefact rather than a result; the
+    # solvency guard in `simulate_entry` stops new trades once it is reached.
     # Settle whatever was still open when the window ended. Leaving these
     # unrealised would report an equity curve that stops mid-trade and quietly
     # omits the open positions' P&L from the final number.
     _settle_due(state, open_book, until=None)
 
-    result.ending_equity = state.equity
+    result.ending_equity = max(state.equity, Decimal(0))
     result.max_drawdown = state.max_drawdown
+    result.ruined = state.equity <= Decimal(0)
     return result
 
 

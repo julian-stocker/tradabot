@@ -266,3 +266,23 @@ universe with no significance testing, no multiple-comparison correction and no
 out-of-sample discipline. The window available here (see docs/research-dataset.md)
 is months, not years. A positive result means the plumbing works and the numbers
 are worth looking at again on more data.
+
+---
+
+## Sample size (phase 5.5)
+
+The phase-5 benchmark covered 12 sessions and qualified 27 observations above the
+75 threshold — far too few to say anything about the strategy. Phase 5.5 removed
+the data constraint; it did not change any strategy logic.
+
+The binding limit is now the **provider's rolling ~6-year window**, not storage
+and not code. See [historical-expansion.md](historical-expansion.md).
+
+Two things a bigger sample does *not* fix, and which remain true of every result
+in this repository:
+
+- **Survivorship.** Instruments still carry no `listed_at`/`delisted_at`, so a
+  historical universe is today's survivors however deep the history goes. More
+  years arguably makes this *worse*, since more delistings fall inside the window.
+- **Modelled costs.** No historical quotes exist at any depth, so every backtested
+  cost remains `MODELLED`.

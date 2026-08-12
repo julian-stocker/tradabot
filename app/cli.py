@@ -1102,6 +1102,32 @@ def _run_backtest(settings: Settings, args: argparse.Namespace) -> int:
     return asyncio.run(research_cli.backtest_report(settings, run_id=args.run_id))
 
 
+def _parse_timeframes(value: str | None) -> list[str]:
+    """Split a comma-separated timeframe list, preserving case.
+
+    Not `_parse_symbols`: that uppercases, and `5m` is not `5M`.
+    """
+    if not value:
+        return ["5m", "15m", "1h", "1d"]
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _run_history(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch a ``history`` subcommand."""
+    return asyncio.run(
+        research_cli.historical_backfill(
+            settings,
+            start=research_cli.parse_day(args.start),
+            end=research_cli.parse_day(args.end),
+            symbols=_parse_symbols(args.symbols) or None,
+            universe=args.universe,
+            timeframes=_parse_timeframes(args.timeframes),
+            resume=not args.no_resume,
+            dry_run=args.dry_run,
+        )
+    )
+
+
 def _run_outcomes(settings: Settings, args: argparse.Namespace) -> int:
     """Dispatch an ``outcomes`` subcommand."""
 
@@ -1121,6 +1147,20 @@ def _run_research(settings: Settings, args: argparse.Namespace) -> int:
     """Dispatch a ``research`` subcommand."""
 
     command = args.research_command
+    # `storage-plan` is the one research subcommand with no horizon: it projects
+    # disk cost, which is a property of the range, not of a forecast window.
+    if command == "storage-plan":
+        return asyncio.run(
+            research_cli.storage_plan(
+                settings,
+                start=research_cli.parse_day(args.start),
+                end=research_cli.parse_day(args.end),
+                symbols=_parse_symbols(args.symbols) or None,
+                universe=args.universe,
+                cadence=args.cadence,
+            )
+        )
+
     horizon = Horizon(args.horizon)
     if command == "score-calibration":
         return asyncio.run(
@@ -1178,6 +1218,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "backtest": _run_backtest,
     "outcomes": _run_outcomes,
     "research": _run_research,
+    "history": _run_history,
 }
 
 
@@ -1295,11 +1336,38 @@ def _add_research_parsers(sub: argparse._SubParsersAction) -> None:  # type: ign
                 help="Use the finer 60-65..>=85 bands around the 75 cutoff",
             )
         if name == "features":
-            parser_.add_argument("--feature", help="One feature name, or 'sector'")
+            parser_.add_argument("--feature", help="A feature name, or 'sector' / 'year'")
         if name == "export":
             parser_.add_argument("--out", default="exports", help="Output directory")
             parser_.add_argument("--format", default="parquet", choices=["parquet", "csv"])
             parser_.add_argument("--include-extended", action="store_true")
+
+    planner = research_sub.add_parser(
+        "storage-plan", help="Project the disk cost of a historical expansion"
+    )
+    planner.add_argument("--from", dest="start", required=True, help="YYYY-MM-DD")
+    planner.add_argument("--to", dest="end", required=True, help="YYYY-MM-DD")
+    planner.add_argument("--symbols", help="Comma-separated tickers; omit for the watchlist")
+    planner.add_argument("--universe", choices=["active"])
+    planner.add_argument(
+        "--cadence",
+        type=float,
+        default=6.0,
+        help="Evaluations per symbol per session (6 = hourly, 26 = every 15 minutes)",
+    )
+
+    history = sub.add_parser("history", help="Historical market-data expansion")
+    history.add_argument("--from", dest="start", required=True, help="YYYY-MM-DD")
+    history.add_argument("--to", dest="end", required=True, help="YYYY-MM-DD")
+    history.add_argument("--symbols", help="Comma-separated tickers; omit for the watchlist")
+    history.add_argument("--universe", choices=["active"])
+    history.add_argument("--timeframes", default="5m,15m,1h,1d", help="Comma-separated timeframes")
+    history.add_argument(
+        "--no-resume", action="store_true", help="Re-request windows already stored"
+    )
+    history.add_argument(
+        "--dry-run", action="store_true", help="Report the plan and download nothing"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:

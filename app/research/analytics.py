@@ -94,6 +94,7 @@ class Observation:
     sector: str | None
     score: float
     horizon: str
+    year: int
     raw_return: float | None
     mfe: float | None
     mae: float | None
@@ -181,6 +182,19 @@ def by_feature_quantile(
     return groups
 
 
+def by_year(rows: Sequence[Observation]) -> list[GroupStats]:
+    """Group by calendar year (part W).
+
+    Calendar years are a crude regime proxy and are used *because* they are
+    crude: they are defined by the calendar rather than by anything fitted to
+    this data, so they cannot be tuned to flatter a result. A volatility- or
+    trend-based split would be more informative and would also be a modelling
+    choice that needs its own justification.
+    """
+    years = sorted({row.year for row in rows})
+    return [summarise([row for row in rows if row.year == year], label=str(year)) for year in years]
+
+
 def by_sector(rows: Sequence[Observation]) -> list[GroupStats]:
     sectors = sorted({row.sector for row in rows if row.sector})
     return [
@@ -228,6 +242,7 @@ async def load_observations(
             sector=_sector_of(tags),
             score=evaluation.score,
             horizon=outcome.horizon,
+            year=outcome.reference_timestamp.year,
             raw_return=outcome.raw_return,
             mfe=outcome.mfe,
             mae=outcome.mae,

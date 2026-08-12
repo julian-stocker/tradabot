@@ -208,3 +208,43 @@ one up, not by adding network calls to the provider.
 
 Event payloads are redacted at construction, so no transport can publish an
 unredacted one — including one written by someone who never read that module.
+
+---
+
+## Historical depth and the `limit` trap (phase 5.5)
+
+Two provider behaviours worth knowing before requesting years of data. Both were
+measured, not read from documentation.
+
+### Depth is a rolling ~6-year window
+
+Every symbol and every timeframe on this account returns data from **2020-07-27**
+and no earlier — identical to the day, exactly 2,206 days before the probe. It is
+an account-level entitlement, and the floor **advances daily**: bars ageing past
+~6 years become permanently unavailable.
+
+Requests for earlier windows succeed and return *nothing*. There is no error to
+detect, so a backfill that does not probe first will record empty responses as
+gaps and retry them forever.
+
+### `limit` truncates by dropping symbols
+
+Alpaca's `limit` applies to the whole response and is honoured by returning
+**fewer symbols**, not shorter series. One 5-minute request for 52 symbols over
+June 2026:
+
+| `limit` | Symbols returned | Bars |
+|---|---|---|
+| `10_000` | **6 of 52** | 10,000 |
+| `None` | 52 of 52 | 86,592 |
+
+Silently. tradabot therefore sends **no limit** on bar requests and bounds the
+response by the date window instead. `AlpacaSettings.max_bars_per_request` is
+retained for reference but deliberately not sent.
+
+Complete responses are larger and slower — a 90-day hourly window for 52 symbols
+takes ~46 s — so long backfills need
+`TRADABOT_ALPACA__REQUEST_TIMEOUT_SECONDS=120`.
+
+See [historical-expansion.md](historical-expansion.md) for chunking, resume and
+gap classification.

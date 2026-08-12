@@ -312,6 +312,36 @@ window. That is a finding to sit with, not a reason to move a threshold.
 
 ---
 
+## Phase 5.5 — Historical data expansion and storage planning ✅
+
+**Delivered.** No migration; measurement, planning and data.
+
+**Scope**
+- Storage estimator built on **measured** bytes/row (`dbstat`), not theory:
+  candle 295 B, SignalEvaluation **4,218 B**, outcome 263 B
+- `research storage-plan` with LOW/EXPECTED/HIGH projections and a three-part
+  disk gate (data + 2x working headroom + 20 GB floor)
+- Resumable, chunked, batched historical backfill (`history` command)
+- Calendar-aware gap classification; nothing is ever interpolated
+- Provider depth probed rather than assumed
+
+**Two provider defects found and fixed**
+- `limit` truncates by **dropping symbols**: one 52-symbol request returned 6
+  symbols and no error. Bar requests now send no limit.
+- Resume compared the *oldest stored bar* to the window start, which assumes
+  contiguous fill. A five-year hole in the hourly series was reported as
+  "complete". Coverage is now measured session by session.
+
+**Key findings**
+- Provider history is a **rolling ~6-year window** (2020-07-27 today), advancing
+  daily. Raw candles are therefore irreplaceable.
+- An evaluation costs 14 candles, so **research storage exceeds market data** and
+  the two stages are budgeted separately.
+- SQLite remains appropriate; see docs/storage-planning.md for the migration
+  triggers.
+
+---
+
 ## Phase 6 — Spread and execution-cost calibration
 
 **Entry:** phase 5, plus observed quote data.

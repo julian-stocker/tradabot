@@ -21,6 +21,9 @@ from app.backtesting.runner import PortfolioResult, run_backtest
 from app.core.config import Settings
 from app.db.session import create_engine, create_session_factory, session_scope
 from app.domain.enums import Horizon, Timeframe
+from app.market_data.backfill import ChunkResult, HistoricalBackfill, chunk_windows
+from app.market_data.calendars import get_trading_calendar
+from app.market_data.registry import build_provider
 from app.research.analytics import (
     SCORE_BANDS,
     THRESHOLD_BANDS,
@@ -28,11 +31,13 @@ from app.research.analytics import (
     by_feature_quantile,
     by_score_band,
     by_sector,
+    by_year,
     load_observations,
 )
 from app.research.export import build_dataset, write_dataset
 from app.research.repository import BacktestRunRepository, OutcomeRepository
 from app.research.service import OutcomeLabellingService
+from app.research.storage import build_plan, human_bytes
 from app.scanner.repository import WatchlistRepository
 
 DEFAULT_EXPORT_DIR = Path("exports")
@@ -238,6 +243,11 @@ async def research_features(
             _print_groups(by_sector(rows))
             return 0
 
+        if feature == "year":
+            print(f"calendar year vs {horizon.value} outcome, n={len(rows)}\n")
+            _print_groups(by_year(rows))
+            return 0
+
         features = [feature] if feature else list(_DEFAULT_FEATURES)
         for name in features:
             groups = by_feature_quantile(rows, feature=name)
@@ -363,3 +373,156 @@ def parse_day(value: str) -> datetime:
         return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=UTC)
     parsed = datetime.fromisoformat(text)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def storage_plan(
+    settings: Settings,
+    *,
+    start: datetime,
+    end: datetime,
+    symbols: list[str] | None,
+    universe: str | None,
+    cadence: float,
+) -> int:
+    """Project the storage cost of an expansion. Reads only; downloads nothing."""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        resolved, _ = await _resolve_symbols(factory, symbols, universe)
+        calendar = get_trading_calendar(settings.market_data.default_exchange)
+        plan = build_plan(
+            calendar=calendar,
+            symbols=len(resolved),
+            start=start,
+            end=end,
+            evaluations_per_session=cadence,
+        )
+
+        print(f"storage plan  {start:%Y-%m-%d} -> {end:%Y-%m-%d}   ({plan.measurement_version})")
+        print(f"  symbols                 {plan.symbols}")
+        print(f"  trading sessions        {plan.sessions:,}")
+        print(f"  timeframes              {', '.join(t.value for t in plan.timeframes)}")
+        print()
+        print(f"  candle rows             {plan.candle_rows:>14,}")
+        print(f"  evaluation rows         {plan.evaluation_rows:>14,}   (at {cadence:g}/session)")
+        print(f"  outcome rows            {plan.outcome_rows:>14,}")
+        print(f"  trade outcome rows      {plan.trade_outcome_rows:>14,}")
+        print()
+        print(f"  {'':<22}{'LOW':>12}{'EXPECTED':>12}{'HIGH':>12}")
+        for label, rng in (
+            ("raw market data", plan.raw_bytes),
+            ("research data", plan.research_bytes),
+            ("parquet export", plan.export_bytes),
+            ("TOTAL db growth", plan.total_bytes),
+        ):
+            print(
+                f"  {label:<22}{human_bytes(rng.low):>12}"
+                f"{human_bytes(rng.expected):>12}{human_bytes(rng.high):>12}"
+            )
+        print()
+        if plan.disk is not None:
+            print(f"  free disk               {human_bytes(plan.disk.free_bytes)}")
+            print(f"  required incl. headroom {human_bytes(plan.disk.required_bytes)}")
+            print(f"  verdict                 {plan.disk.verdict} -- {plan.disk.detail}")
+        for note in plan.notes:
+            print(f"  note: {note}")
+        return 0 if plan.disk is None or plan.disk.verdict != "UNSAFE" else 1
+    finally:
+        await engine.dispose()
+
+
+async def historical_backfill(
+    settings: Settings,
+    *,
+    start: datetime,
+    end: datetime,
+    symbols: list[str] | None,
+    universe: str | None,
+    timeframes: list[str],
+    resume: bool,
+    dry_run: bool,
+) -> int:
+    """Expand stored history in resumable chunks."""
+
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        resolved, _ = await _resolve_symbols(factory, symbols, universe)
+        if not resolved:
+            print("no symbols; seed the watchlist or pass --symbols")
+            return 1
+        frames = [Timeframe(value) for value in timeframes]
+
+        calendar = get_trading_calendar(settings.market_data.default_exchange)
+        plan = build_plan(
+            calendar=calendar,
+            symbols=len(resolved),
+            start=start,
+            end=end,
+            timeframes=tuple(frames),
+            include_research=False,
+        )
+        # Requests, not (symbol x window) pairs: one batched call covers the
+        # whole universe for a window, which is what makes this finish at all.
+        requests = sum(
+            len(list(chunk_windows(start=start, end=end, timeframe=tf))) for tf in frames
+        )
+
+        print(f"historical backfill  {start:%Y-%m-%d} -> {end:%Y-%m-%d}")
+        print(
+            f"  symbols {len(resolved)}  timeframes {','.join(timeframes)}  "
+            f"sessions {plan.sessions:,}"
+        )
+        print(f"  projected {plan.candle_rows:,} rows, {human_bytes(plan.raw_bytes.expected)}")
+        print(
+            f"  {requests:,} batched requests (52 symbols each); "
+            f"disk verdict {plan.disk.verdict if plan.disk else 'n/a'}"
+        )
+
+        if plan.disk is not None and plan.disk.verdict == "UNSAFE":
+            print(f"  REFUSED: {plan.disk.detail}")
+            return 1
+        if dry_run:
+            print("  dry run; nothing downloaded")
+            return 0
+
+        # A provider check that cannot be satisfied by mock data: historical
+        # expansion must never pollute the archive with synthetic bars.
+        if settings.market_data_provider != "alpaca":
+            print(f"  REFUSED: provider is {settings.market_data_provider!r}, not alpaca")
+            return 1
+
+        done = {"n": 0, "rows": 0}
+
+        def on_chunk(result: ChunkResult) -> None:
+            done["n"] += 1
+            done["rows"] += result.inserted
+            if done["n"] % 5 == 0 or not result.ok:
+                flag = "" if result.ok else f"  FAILED: {result.error}"
+                print(
+                    f"  [{done['n']:>4}/{requests}] {result.timeframe.value:<4} "
+                    f"{result.start:%Y-%m-%d} +{result.inserted:>7,} rows "
+                    f"(total {done['rows']:,}){flag}",
+                    flush=True,
+                )
+
+        backfill = HistoricalBackfill(
+            factory, build_provider(settings), exchange=settings.market_data.default_exchange
+        )
+        report = await backfill.run(
+            symbols=resolved,
+            timeframes=frames,
+            start=start,
+            end=end,
+            resume=resume,
+            progress=on_chunk,
+        )
+        print(f"\n{report.summary()}")
+        for failure in report.failed[:10]:
+            print(
+                f"  failed: {failure.symbol} {failure.timeframe.value} "
+                f"{failure.start:%Y-%m-%d} -- {failure.error}"
+            )
+        return 0 if report.ok else 1
+    finally:
+        await engine.dispose()

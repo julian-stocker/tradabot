@@ -106,18 +106,14 @@ then quoting it as validation would be circular.
 
 ## Data currently available
 
-The limiting factor is intraday history, not code.
+Expanded in phase 5.5. Depth is allocated by how each timeframe is *used*, not
+uniformly: H1 is the backtest's primary series and D1 the macro context, so both
+carry the full provider window; M15/M5 are confirmation and entry context and
+need only cover the benchmark window at full fidelity.
 
-| Timeframe | Sessions | Range |
-|---|---|---|
-| D1 | 276 | 2025-07-08 → 2026-08-11 |
-| H1 | 124 | 2026-02-12 → 2026-08-11 |
-| M15 | 31 | 2026-06-29 → 2026-08-11 |
-| M5 | 15 | 2026-07-22 → 2026-08-11 |
+See docs/historical-expansion.md for the exact ranges after expansion, and
+docs/storage-planning.md for what further depth would cost.
 
-A **production-faithful** replay needs all four timeframes and is therefore
-limited to roughly the last 15 sessions. Over the longer H1 window the 5m and 15m
-contexts degrade to `INSUFFICIENT`, which is a *different* strategy from the live
-one -- honest, but not the same thing, and any run over that window must say so.
-
-Deeper M5/M15 history is the single highest-value data acquisition for phase 6.
+The hard ceiling is the provider: history is a **rolling ~6-year window** that
+advances daily, so no amount of storage buys data older than that, and data
+allowed to age out cannot be recovered.

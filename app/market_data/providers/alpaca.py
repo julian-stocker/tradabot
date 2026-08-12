@@ -342,7 +342,16 @@ class AlpacaMarketDataProvider:
             timeframe=TimeFrame(amount, TimeFrameUnit(unit)),
             start=start,
             end=end,
-            limit=self._settings.max_bars_per_request,
+            # **No limit.** Alpaca applies `limit` to the whole response, not per
+            # symbol, and truncates by dropping symbols entirely rather than by
+            # shortening each series. Measured: one 52-symbol 5-minute request for
+            # June 2026 returned 10,000 bars covering **6 symbols**; the other 46
+            # came back with nothing at all, and no error. A backfill built on
+            # that would silently store a dataset missing 88% of the universe.
+            #
+            # The response is bounded by the *date window* instead -- see
+            # `app.market_data.backfill.CHUNK_DAYS` -- which bounds it honestly.
+            limit=None,
             # RAW: tradabot stores what traded and adjusts on read.
             adjustment=Adjustment.RAW,
             feed=DataFeed(self._settings.feed),

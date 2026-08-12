@@ -212,3 +212,20 @@ Both are idempotent. A second `outcomes generate` updates rows in place rather
 than duplicating them, and completes anything that was pending. A second
 `backtest run` with the same configuration creates a new run row sharing the same
 `run_key` -- which is how reproducibility is checked, not an error.
+
+### Historical expansion alongside the scheduler
+
+A multi-hour backfill runs **while the scheduler keeps running**. Chunks commit
+independently and briefly, so the 5-minute sync waits milliseconds for the SQLite
+write lock. There is no need to stop the scheduler, and stopping it would be
+worse: the gap left in recent data is a bigger problem than the lock contention
+it avoids.
+
+```bash
+make storage-plan FROM=2020-07-27 TO=2026-08-11   # always project first
+make history-plan FROM=2020-07-27 TO=2026-08-11   # what it would do
+make history FROM=2020-07-27 TO=2026-08-11        # resumable; safe to interrupt
+```
+
+Interrupting is safe and re-running is cheap: coverage is measured session by
+session, so completed windows are skipped rather than re-downloaded.

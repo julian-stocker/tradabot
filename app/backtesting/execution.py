@@ -124,6 +124,15 @@ def simulate_entry(
     if entry_bar is None:
         return SimulatedTrade(executed=False, rejection_reason="NO_EXECUTABLE_BAR")
 
+    if state.equity <= ZERO:
+        # **Ruin is terminal.** An unleveraged cash account cannot trade its way
+        # out of zero, and a simulator that keeps going produces negative equity
+        # -- which is not a bad result, it is an impossible one. The first
+        # 100 EUR benchmark ran past insolvency and finished at -4.02 EUR,
+        # because a flat exit fee was still being charged against cash that no
+        # longer existed.
+        return SimulatedTrade(executed=False, rejection_reason="ACCOUNT_RUINED")
+
     if state.open_positions >= state.profile.risk.max_open_positions:
         return SimulatedTrade(
             executed=False, rejection_reason=OrderRejectionReason.MAX_OPEN_POSITIONS.value
