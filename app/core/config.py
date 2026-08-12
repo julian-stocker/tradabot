@@ -33,6 +33,19 @@ from app.scanner.universe import universe_symbols
 
 _PORTFOLIO_WEBHOOK_KEY = re.compile(r"paper_(?P<suffix>[a-z0-9_]+)_webhook")
 
+_FEED_WEBHOOK_KEYS: dict[str, str] = {
+    "watch_webhook": "watch-opportunities",
+    "buy_webhook": "buy-opportunities",
+    "sell_exit_webhook": "sell-exit-signals",
+}
+"""Opportunity-feed variables to routing keys.
+
+Reuses ``portfolio_webhooks`` as the destination map so there is one routing
+mechanism, not two. Every one of these is optional: a missing variable means the
+message falls back to the market channel, and startup never fails because a
+future channel does not exist yet.
+"""
+
 WEIGHT_SUM_TOLERANCE = 1e-6
 
 
@@ -353,6 +366,19 @@ class DiscordSettings(BaseModel):
             "loses no information."
         ),
     )
+    watch_webhook: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Optional #watch-opportunities channel. Absent is normal: the "
+            "message falls back to the market channel."
+        ),
+    )
+    buy_webhook: SecretStr = Field(
+        default=SecretStr(""), description="Optional #buy-opportunities channel."
+    )
+    sell_exit_webhook: SecretStr = Field(
+        default=SecretStr(""), description="Optional #sell-exit-signals channel."
+    )
     username: str = Field(default="tradabot", description="Display name on posted messages.")
 
     @model_validator(mode="before")
@@ -377,6 +403,13 @@ class DiscordSettings(BaseModel):
                 continue
             routing_key = f"paper-{match.group('suffix').replace('_', '-')}"
             collected.setdefault(routing_key, values.pop(key))
+
+        # Opportunity feeds use the same map, so routing needs no second
+        # mechanism. Absent variables simply do not appear, and the backend
+        # falls back to the market channel -- see `docs/discord.md`.
+        for key, routing_key in _FEED_WEBHOOK_KEYS.items():
+            if key in values:
+                collected.setdefault(routing_key, values.pop(key))
 
         if collected:
             values["portfolio_webhooks"] = collected

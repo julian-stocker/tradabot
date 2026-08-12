@@ -239,7 +239,12 @@
       "Bash(sqlite3 -header -column tradabot.db \"SELECT exchange, COUNT\\(*\\) n, SUM\\(name!=symbol\\) named FROM instruments GROUP BY exchange;\")",
       "Bash(.venv/bin/mypy app/notifications/ --strict)",
       "Bash(.venv/bin/mypy app/scanner/ --strict)",
-      "Bash(sqlite3 tradabot.db \"PRAGMA integrity_check;\")"
+      "Bash(sqlite3 tradabot.db \"PRAGMA integrity_check;\")",
+      "Bash(.venv/bin/mypy app/scanner/levels.py --strict)",
+      "Bash(.venv/bin/mypy app/scanner/plans.py --strict)",
+      "Bash(.venv/bin/mypy app/core/config.py --strict)",
+      "Bash(awk '{print \"  .env last modified:\", $6, $7, $8}')",
+      "Bash(sqlite3 tradabot.db \"SELECT COUNT\\(*\\) FROM sqlite_master WHERE type='table';\")"
     ]
   }
 }
