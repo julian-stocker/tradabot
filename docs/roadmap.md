@@ -342,6 +342,35 @@ window. That is a finding to sit with, not a reason to move a threshold.
 
 ---
 
+## Phase 5.6 — Signal intelligence and Discord lifecycle ✅
+
+**Partially delivered.** No migration.
+
+**Delivered**
+- Closed/extended-hours/zero-candidate overview suppression — the reported
+  "No qualified opportunities." defect
+- Signal **episodes**: 617 qualifying observations → 228 episodes, and the
+  finding that the >=75 advantage shrinks by ~2/3 under de-duplication
+- Component attribution and a predefined interaction set — **all essentially
+  null**; no single component discriminates
+- Horizon model with an honest `NOT_AVAILABLE` for LONG_TERM
+- Discord embeds with plaintext fallback; no fabricated fields
+- `notifications demo-lifecycle` — manual, clearly marked, writes nothing
+- **Instrument identity fixed**: 32 of 52 instruments were wrongly XNAS; all 52
+  company names populated from Alpaca's asset catalogue
+
+**Completed in the follow-up pass**
+- Opportunity embed wired into the **live** scanner emission path
+  (`_notification_payload` -> `format_event` -> `opportunity_fields`)
+- Daily report restricted to the three personal portfolios
+- Watch/buy/sell feed keys implemented with a market-signals fallback; WATCH
+  returns `NOT_IMPLEMENTED` because the 70-75 band is the weakest in the data
+
+See [signal-intelligence.md](signal-intelligence.md) and
+[providers.md](providers.md).
+
+---
+
 ## Phase 6 — Spread and execution-cost calibration
 
 **Entry:** phase 5, plus observed quote data.

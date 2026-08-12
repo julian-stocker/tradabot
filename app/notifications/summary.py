@@ -13,6 +13,7 @@ channel that get quoted back later as if they meant something.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -29,6 +30,7 @@ from app.market_data.calendars import get_trading_calendar
 from app.paper.performance import summarise
 from app.paper.repository import PaperTradingRepository
 from app.scanner.repository import SignalEvaluationRepository, TrackedSignalRepository
+from app.simulation.portfolios import PORTFOLIO_KEYS
 from app.simulation.repository import SimulationProfileRepository
 
 logger = get_logger(__name__)
@@ -41,9 +43,19 @@ establishing it is phase 5's job."""
 
 
 async def build_daily_summary(
-    session: AsyncSession, *, session_date: date | None = None, since: datetime | None = None
+    session: AsyncSession,
+    *,
+    session_date: date | None = None,
+    since: datetime | None = None,
+    profile_keys: Sequence[str] | None = PORTFOLIO_KEYS,
 ) -> dict[str, Any]:
-    """Assemble the daily report for every enabled profile.
+    """Assemble the daily report for the user-facing portfolios.
+
+    ``profile_keys`` defaults to the three personal portfolios. The nine legacy
+    research profiles stay enabled and keep trading -- they are simply not in the
+    Discord report, because twelve portfolio blocks on a phone is a wall nobody
+    reads, and only three of them are the user's. Pass ``None`` to include every
+    enabled profile, which is what the CLI does for research.
 
     Returns a payload for :meth:`app.core.events.Event.daily_summary`. Keys the
     formatter cannot render are simply absent rather than null, so "not
@@ -65,6 +77,8 @@ async def build_daily_summary(
 
     for profile in await profiles.list_profiles(enabled_only=True):
         if profile.id is None:  # pragma: no cover -- persisted profiles have ids
+            continue
+        if profile_keys is not None and profile.name not in profile_keys:
             continue
 
         try:

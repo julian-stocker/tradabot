@@ -117,3 +117,21 @@ docs/storage-planning.md for what further depth would cost.
 The hard ceiling is the provider: history is a **rolling ~6-year window** that
 advances daily, so no amount of storage buys data older than that, and data
 allowed to age out cannot be recovered.
+
+
+## Observations are not independent (phase 5.6)
+
+Every statistic in this dataset should be read twice: once per observation, once
+per **episode**. A continuous move produces a run of near-identical qualifying
+rows, and counting them separately inflates the sample.
+
+617 qualifying observations in the phase-5.5 benchmark are **228 episodes** — a
+2.7x inflation. The >=75 positive-rate advantage falls from +6.7pp to roughly
++2.3pp once collapsed.
+
+Episode assignment is deterministic and derived, never stored
+(`app/research/episodes.py`): keyed on `(symbol, direction)`, continued across
+gaps up to 24 hours, broken by reversal, and scored at the episode's **first**
+observation rather than its peak.
+
+See [signal-intelligence.md](signal-intelligence.md).

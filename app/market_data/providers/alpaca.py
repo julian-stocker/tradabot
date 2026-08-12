@@ -50,10 +50,39 @@ from app.core.time import ensure_utc, utc_now
 from app.corporate_actions.models import CorporateAction
 from app.domain.enums import AssetType, CorporateActionType, Timeframe
 from app.domain.quotes import Quote
-from app.market_data.provider import CandleData, InstrumentInfo
+from app.market_data.provider import AssetMetadata, CandleData, InstrumentInfo
 from app.market_data.quality import NormalisationReport
 
 logger = get_logger(__name__)
+
+_MIC_BY_ALPACA_EXCHANGE: Final[dict[str, str]] = {
+    "NYSE": "XNYS",
+    "NASDAQ": "XNAS",
+    "ARCA": "ARCX",
+    "AMEX": "XASE",
+    "BATS": "BATS",
+    "OTC": "OTCM",
+}
+"""Alpaca's exchange names to ISO 10383 MICs.
+
+The MIC is the provider-neutral key: `exchange-calendars` takes one, and a
+future Xetra or Tokyo provider reports XETR/XTKS rather than a vendor string.
+Storing Alpaca's own spelling would make the column mean "what Alpaca called it",
+which is not a fact about the instrument.
+"""
+
+
+def _mic_for(exchange: object) -> str | None:
+    """Map a provider exchange to a MIC, or None when unrecognised.
+
+    None rather than a default: defaulting is exactly how every instrument came
+    to claim XNAS.
+    """
+    if exchange is None:
+        return None
+    raw = getattr(exchange, "value", exchange)
+    return _MIC_BY_ALPACA_EXCHANGE.get(str(raw).upper())
+
 
 PROVIDER_NAME: Final = "alpaca"
 
@@ -172,12 +201,15 @@ class AlpacaMarketDataProvider:
     async def get_instruments(self) -> list[InstrumentInfo]:
         """The configured watchlist as instrument metadata.
 
-        Alpaca's asset catalogue lives behind the *trading* API, which tradabot
-        deliberately does not authenticate against -- requesting a trading
-        credential for a market-data tool would be asking for more access than
-        the job needs. The watchlist is therefore the universe, and its metadata
-        is minimal by design: name and listing dates come from a reference source
-        later (docs/market-data.md).
+        Metadata here is a **placeholder**, and knowing that matters: ``name`` is
+        the ticker and ``exchange`` is the configured default, so every instrument
+        seeded through this path claims to be on XNAS whether or not it is. JPM,
+        KO and XOM are NYSE-listed and were all recorded as XNAS.
+
+        The real catalogue lives behind Alpaca's *trading* API. See
+        :meth:`get_asset_metadata`, which reads it deliberately and separately --
+        this method stays credential-light so seeding works with market-data
+        access alone.
         """
         return [
             InstrumentInfo(
@@ -189,6 +221,47 @@ class AlpacaMarketDataProvider:
             )
             for symbol in self._market_data.watchlist
         ]
+
+    async def get_asset_metadata(self, symbols: Sequence[str]) -> dict[str, AssetMetadata]:
+        """Authoritative name, exchange and tradability, from Alpaca's asset catalogue.
+
+        **Read-only, and separate from everything else on purpose.** This is the
+        only method in the codebase that touches the trading API, and it calls
+        exactly one endpoint: ``GET /v2/assets/{symbol}``. It cannot place,
+        modify or cancel an order -- no order type is imported here and none is
+        reachable from this client. tradabot still submits no orders anywhere.
+
+        It is separate because seeding must keep working with market-data
+        credentials alone; identity enrichment is an explicit, opt-in step
+        (``tradabot market-data refresh-identity``).
+
+        A symbol the catalogue does not know is omitted rather than guessed --
+        the whole point is to stop inventing metadata.
+        """
+        from alpaca.trading.client import TradingClient
+
+        client = TradingClient(
+            api_key=self._settings.api_key.get_secret_value(),
+            secret_key=self._settings.api_secret.get_secret_value(),
+            paper=True,
+        )
+
+        found: dict[str, AssetMetadata] = {}
+        for symbol in symbols:
+            try:
+                asset = await self._call(partial(client.get_asset, symbol.upper()), "get_asset")
+            except ProviderError as exc:
+                logger.warning(
+                    "asset lookup failed", symbol=symbol.upper(), error=_safe_message(exc)
+                )
+                continue
+            found[symbol.upper()] = AssetMetadata(
+                symbol=symbol.upper(),
+                name=str(getattr(asset, "name", "") or "") or None,
+                exchange=_mic_for(getattr(asset, "exchange", None)),
+                tradable=bool(getattr(asset, "tradable", False)),
+            )
+        return found
 
     async def get_historical_candles(
         self,

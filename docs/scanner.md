@@ -243,3 +243,33 @@ want the `candles` hypertable's time-partitioning. See
 - [ml-dataset.md](ml-dataset.md) — what is stored and why
 - [operations.md](operations.md) — scheduling
 - [notifications.md](notifications.md) — what reaches Discord
+
+---
+
+## Horizons (phase 5.6)
+
+A score is not a recommendation until it says *over what period*. Each horizon is
+answered independently from the timeframes that bear on it
+(`app/scanner/horizons.py`); see [signal-intelligence.md](signal-intelligence.md)
+for the full table and the reasoning.
+
+`LONG_TERM` returns `NOT_AVAILABLE` — no outcome label reaches beyond 20 trading
+days, no feature has a multi-month lookback, and there is no fundamental data at
+all. **`NOT_AVAILABLE` is not `NEUTRAL`**: no opinion and no expected movement are
+different claims.
+
+## Closed-market behaviour
+
+| Session | Evaluations recorded | New signals qualify | Market overview |
+|---|---|---|---|
+| REGULAR | yes | yes | when candidates exist |
+| PRE_MARKET / AFTER_HOURS | yes | **no** | **suppressed** |
+| CLOSED / WEEKEND / HOLIDAY | yes | no | **suppressed** |
+
+Evaluations are always recorded — the observation is real and belongs in the
+dataset. What changes outside the regular session is *promotion* and
+*notification*, never persistence.
+
+Extended hours are excluded because the IEX feed's thin book reads differently
+there: phase 4 recorded 883–1118 bps spreads on mega-caps after the close. Those
+are accurate reports of an empty book, not executable costs.

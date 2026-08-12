@@ -19,6 +19,13 @@ the moment it *became* stale, which is the only interesting instant. So health
 alerts are also transitions: healthy → unhealthy notifies, unhealthy → unhealthy
 does not, and unhealthy → healthy sends a recovery.
 
+**Overview spam.** The hourly market overview published unconditionally --
+including "No qualified opportunities." at 03:00 on a Sunday. Zero candidates is
+the *normal* state: the phase-5.5 benchmark qualified 385 observations out of
+116,844, so roughly 997 of every 1,000 scans have nothing to say. Announcing
+that hourly is the purest form of the problem this module exists to solve, and it
+trains the reader to ignore the one channel that should never be ignored.
+
 Both are the same idea: notify on change, not on state. The difference is only
 what counts as a change.
 """
@@ -31,6 +38,7 @@ from enum import StrEnum
 
 from app.core.config import NotificationSettings
 from app.core.events import EventType
+from app.scanner.enums import SessionPhase
 
 
 class SignalPhase(StrEnum):
@@ -176,6 +184,56 @@ def _evaluate_repeat(
         next_state=SignalState(phase, score, now),
         reason=f"moved {moved:.1f} after cooldown",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class OverviewDecision:
+    """Whether to publish a routine market overview, and why not."""
+
+    should_publish: bool
+    reason: str
+
+    def __bool__(self) -> bool:
+        return self.should_publish
+
+
+def evaluate_overview(
+    *,
+    candidate_count: int,
+    session: SessionPhase,
+    require_regular_session: bool = True,
+) -> OverviewDecision:
+    """Decide whether an hourly market overview is worth sending.
+
+    Three rules, in order:
+
+    1. **A closed market has no opportunities to report.** Weekend, holiday and
+       out-of-hours overviews are pure noise -- nothing has changed since the
+       close and nothing can until the open. Closed-market status belongs in the
+       daily summary, which is a report, not an alert.
+    2. **Extended hours do not qualify signals either.** The scanner already
+       refuses to promote setups on pre/post-market IEX prints (see
+       `app.scanner.sessions`), so an overview then can only ever say zero.
+       Announcing a foregone conclusion is still noise.
+    3. **Zero candidates is not news.** It is the overwhelmingly common state.
+       An overview is published when there is something *in* it.
+
+    Nothing here suppresses a *transition*: a signal newly qualifying still
+    notifies through :func:`evaluate_signal`. This governs only the periodic
+    digest.
+    """
+    if session in _CLOSED_PHASES:
+        return OverviewDecision(False, f"market {session.value.lower()}")
+    if require_regular_session and session is not SessionPhase.REGULAR:
+        return OverviewDecision(False, f"{session.value.lower()} cannot qualify signals")
+    if candidate_count <= 0:
+        return OverviewDecision(False, "no qualified opportunities")
+    return OverviewDecision(True, f"{candidate_count} qualified")
+
+
+_CLOSED_PHASES: frozenset[SessionPhase] = frozenset(
+    {SessionPhase.CLOSED, SessionPhase.WEEKEND, SessionPhase.HOLIDAY}
+)
 
 
 def _phase_for(settings: NotificationSettings, score: float) -> SignalPhase:

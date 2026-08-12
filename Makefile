@@ -179,6 +179,9 @@ research-features: ## Feature values against outcomes
 research-export: ## Write a versioned research dataset and manifest
 	$(BIN)/python -m app.cli research export --horizon $(or $(HORIZON),1d) --out exports
 
+notify-demo: ## Send clearly-marked TEST messages to every Discord destination (manual)
+	$(BIN)/python -m app.cli notifications demo-lifecycle
+
 storage-plan: ## Project disk cost of an expansion (FROM=YYYY-MM-DD TO=YYYY-MM-DD)
 	$(BIN)/python -m app.cli research storage-plan --from $(FROM) --to $(TO) --universe active
 

@@ -227,7 +227,19 @@
       "Bash(sqlite3 tradabot.db \"SELECT \\(SELECT COUNT\\(*\\) FROM signal_evaluations WHERE backtest_run_id IS NOT NULL\\) evals, \\(SELECT COUNT\\(*\\) FROM signal_outcomes\\) outcomes, \\(SELECT COUNT\\(*\\) FROM trade_outcomes\\) trades, \\(SELECT COUNT\\(*\\) FROM backtest_runs\\) runs;\")",
       "Bash(sqlite3 tradabot.db \"SELECT COUNT\\(*\\) FROM signal_outcomes;\")",
       "Bash(sqlite3 -header -column tradabot.db \"SELECT id, status, from_timestamp, to_timestamp, observation_count, symbols_processed, ROUND\\(duration_seconds\\) secs FROM backtest_runs;\")",
-      "Bash(awk '{printf \"cpu=%s%% elapsed=%s\\\\n\", $3, $10}')"
+      "Bash(awk '{printf \"cpu=%s%% elapsed=%s\\\\n\", $3, $10}')",
+      "Bash(xattr -l tradabot.db)",
+      "Bash(.venv/bin/mypy app/notifications/policy.py --strict)",
+      "Bash(.venv/bin/mypy app/research/episodes.py --strict)",
+      "Bash(sqlite3 tradabot.db \"PRAGMA table_info\\(instruments\\);\")",
+      "Bash(awk -F'|' '{printf \"%s \", $2}')",
+      "Bash(.venv/bin/mypy app/scanner/horizons.py --strict)",
+      "Bash(.venv/bin/mypy app/notifications/demo.py --strict)",
+      "Bash(sqlite3 tradabot.db \"PRAGMA quick_check;\")",
+      "Bash(sqlite3 -header -column tradabot.db \"SELECT exchange, COUNT\\(*\\) n, SUM\\(name!=symbol\\) named FROM instruments GROUP BY exchange;\")",
+      "Bash(.venv/bin/mypy app/notifications/ --strict)",
+      "Bash(.venv/bin/mypy app/scanner/ --strict)",
+      "Bash(sqlite3 tradabot.db \"PRAGMA integrity_check;\")"
     ]
   }
 }

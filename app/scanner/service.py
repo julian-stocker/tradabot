@@ -71,6 +71,7 @@ from app.scanner.analysis import (
     MultiTimeframeAnalyser,
 )
 from app.scanner.enums import DataQuality, SessionPhase, SignalLifecycle
+from app.scanner.horizons import TradingHorizon, classify_horizons
 from app.scanner.lifecycle import (
     SignalIdentity,
     direction_label,
@@ -565,7 +566,15 @@ class ScannerService:
 
         ranked = to_ranked(evaluation, instrument.symbol)
         payload = _notification_payload(
-            symbol=instrument.symbol, signal=signal, quote=quote, evaluation=evaluation
+            symbol=instrument.symbol,
+            signal=signal,
+            quote=quote,
+            evaluation=evaluation,
+            instrument=instrument,
+            context=context,
+            lifecycle=transition.lifecycle if transition is not None else None,
+            settings=self._settings,
+            now=now,
         )
 
         return SymbolOutcome(
@@ -995,19 +1004,36 @@ def _close_events(closed: list[tuple[str, Any]], *, symbol: str) -> list[Event]:
 
 
 def _notification_payload(
-    *, symbol: str, signal: Any, quote: Quote | None, evaluation: SignalEvaluation
+    *,
+    symbol: str,
+    signal: Any,
+    quote: Quote | None,
+    evaluation: SignalEvaluation,
+    instrument: Instrument | None = None,
+    context: MultiTimeframeContext | None = None,
+    lifecycle: SignalLifecycle | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """What a Discord message renders from.
 
-    Only values that exist. The formatter omits missing fields rather than
-    inventing them, so passing a null here produces a shorter message, never a
-    fabricated metric.
+    **Only values that exist.** A null here produces a shorter message, never a
+    fabricated metric -- and there is deliberately no key for support,
+    resistance, a price target, an entry zone or an expected price, because the
+    scanner computes none of them.
+
+    Everything is read from the evaluation that was just persisted or the context
+    that produced it, so the message and the stored row cannot disagree.
     """
+    primary = context.primary if context is not None else None
+    entry = context.entry if context is not None else None
+
     payload: dict[str, Any] = {
         "symbol": symbol,
         "score": evaluation.score,
         "confidence": evaluation.confidence,
         "classification": evaluation.classification,
+        "direction": evaluation.direction,
         "timeframe": PRIMARY_TIMEFRAME.value,
         "components": {
             tf: state.get("trend")
@@ -1015,6 +1041,19 @@ def _notification_payload(
             if isinstance(state, dict)
         },
     }
+
+    if instrument is not None and instrument.name and instrument.name != symbol:
+        # Populated only since the identity refresh; before that `name` was the
+        # ticker, and repeating the symbol as its own company name is noise.
+        payload["company_name"] = instrument.name
+    if lifecycle is not None:
+        payload["lifecycle_state"] = lifecycle.value
+
+    if context is not None:
+        payload.update(_horizon_states(context))
+
+    payload.update(_component_fields(primary, entry))
+
     if signal is not None:
         payload["horizon"] = signal.horizon.value
         payload["net_edge_bps"] = float(signal.net_edge.net_edge_bps)
@@ -1024,4 +1063,96 @@ def _notification_payload(
         payload["bid"] = float(quote.bid)
         payload["ask"] = float(quote.ask)
         payload["spread_bps"] = float(quote.spread_bps)
+        payload["liquidity"] = _spread_label(float(quote.spread_bps))
+
+    if evaluation.market_data_timestamp is not None:
+        payload["market_data_timestamp"] = evaluation.market_data_timestamp.strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+        if now is not None:
+            age = (now - evaluation.market_data_timestamp).total_seconds() / 60.0
+            payload["freshness"] = f"{age:.0f} min old ({evaluation.data_quality})"
+    if settings is not None:
+        payload["provider"] = settings.market_data_provider
+        payload["feed"] = settings.alpaca.feed
+
     return payload
+
+
+def _component_fields(primary: Any, entry: Any) -> dict[str, Any]:
+    """Trend, price, momentum, structure, volatility and volume, where present.
+
+    Split out so the payload builder stays readable; each value is still omitted
+    individually rather than defaulted.
+    """
+    fields: dict[str, Any] = {}
+    if primary is not None:
+        fields["trend"] = primary.trend.value
+        if primary.close is not None:
+            fields["price"] = float(primary.close)
+        if primary.rsi is not None:
+            fields["momentum"] = _rsi_label(primary.rsi)
+        if primary.structure is not None:
+            fields["structure"] = primary.structure.value
+        if primary.volatility is not None:
+            fields["volatility"] = _volatility_label(primary.volatility)
+    if entry is not None and entry.relative_volume is not None:
+        fields["volume"] = _volume_label(entry.relative_volume)
+    return fields
+
+
+def _horizon_states(context: MultiTimeframeContext) -> dict[str, str]:
+    """The four trading horizons as payload keys.
+
+    LONG_TERM is included precisely because it reads NOT_AVAILABLE: omitting it
+    would let a reader assume the horizon was merely neutral.
+    """
+    assessed = classify_horizons(context)
+    return {
+        "intraday": assessed[TradingHorizon.INTRADAY].state.value,
+        "short_term": assessed[TradingHorizon.SHORT_TERM].state.value,
+        "medium_term": assessed[TradingHorizon.MEDIUM_TERM].state.value,
+        "long_term": assessed[TradingHorizon.LONG_TERM].state.value,
+    }
+
+
+def _rsi_label(rsi: float) -> str:
+    """RSI as words. The number itself is already in the plaintext body."""
+    if rsi >= 70:  # noqa: PLR2004 -- conventional RSI bands
+        return "overbought"
+    if rsi >= 55:  # noqa: PLR2004
+        return "positive"
+    if rsi <= 30:  # noqa: PLR2004
+        return "oversold"
+    if rsi <= 45:  # noqa: PLR2004
+        return "weak"
+    return "neutral"
+
+
+def _volume_label(relative: float) -> str:
+    if relative >= 2:  # noqa: PLR2004
+        return f"surging ({relative:.1f}x)"
+    if relative >= 1:
+        return f"confirmed ({relative:.1f}x)"
+    return f"thin ({relative:.1f}x)"
+
+
+def _volatility_label(volatility: float) -> str:
+    """``volatility_20`` is annualised and fractional: 0.22 is 22% a year."""
+    percent = volatility * 100
+    if percent >= 60:  # noqa: PLR2004
+        return f"very high ({percent:.0f}%)"
+    if percent >= 35:  # noqa: PLR2004
+        return f"elevated ({percent:.0f}%)"
+    if percent >= 20:  # noqa: PLR2004
+        return f"normal ({percent:.0f}%)"
+    return f"low ({percent:.0f}%)"
+
+
+def _spread_label(spread_bps: float) -> str:
+    """Liquidity from the observed spread, with the phase-4 caveat built in."""
+    if spread_bps >= 100:  # noqa: PLR2004
+        return f"very wide ({spread_bps:.0f} bps -- likely a thin book)"
+    if spread_bps >= 20:  # noqa: PLR2004
+        return f"wide ({spread_bps:.0f} bps)"
+    return f"normal ({spread_bps:.1f} bps)"

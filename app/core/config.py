@@ -345,6 +345,14 @@ class DiscordSettings(BaseModel):
     backoff_base_seconds: float = Field(default=0.5, gt=0)
     backoff_max_seconds: float = Field(default=15.0, gt=0)
 
+    use_embeds: bool = Field(
+        default=True,
+        description=(
+            "Render messages as Discord embeds. The plaintext body is always "
+            "sent alongside, so turning this off degrades presentation and "
+            "loses no information."
+        ),
+    )
     username: str = Field(default="tradabot", description="Display name on posted messages.")
 
     @model_validator(mode="before")

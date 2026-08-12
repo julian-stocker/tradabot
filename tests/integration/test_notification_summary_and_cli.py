@@ -13,15 +13,39 @@ from app.simulation.repository import SimulationProfileRepository
 pytestmark = pytest.mark.integration
 
 
-async def test_a_summary_covers_every_enabled_profile(session: AsyncSession) -> None:
+async def test_the_default_report_covers_only_the_user_facing_portfolios(
+    session: AsyncSession,
+) -> None:
+    """**The nine legacy research profiles stay out of Discord.**
+
+    They remain enabled and keep trading -- they are simply not in the report.
+    Twelve portfolio blocks on a phone is a wall nobody reads, and only three of
+    them are the user's.
+    """
+    from app.simulation.portfolios import PORTFOLIO_KEYS, build_personal_profiles
+
     profiles = SimulationProfileRepository(session)
     await profiles.upsert_many(build_default_profiles())
+    await profiles.upsert_many(build_personal_profiles())
     await session.flush()
     enabled = await profiles.list_profiles(enabled_only=True)
 
     payload = await build_daily_summary(session)
 
-    assert len(payload["portfolios"]) == len(enabled)
+    reported = {p["profile"] for p in payload["portfolios"]}
+    assert reported == set(PORTFOLIO_KEYS)
+    assert len(enabled) > len(reported), "the legacy profiles must still be enabled"
+
+
+async def test_research_can_still_see_every_enabled_profile(session: AsyncSession) -> None:
+    """Hidden from the report, not deleted: passing None restores the full list."""
+    profiles = SimulationProfileRepository(session)
+    await profiles.upsert_many(build_default_profiles())
+    await session.flush()
+    enabled = await profiles.list_profiles(enabled_only=True)
+
+    payload = await build_daily_summary(session, profile_keys=None)
+
     assert {p["profile"] for p in payload["portfolios"]} == {p.name for p in enabled}
 
 

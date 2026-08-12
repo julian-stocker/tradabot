@@ -26,6 +26,7 @@ from typing import Any
 
 from app.core.events import Event, EventType
 from app.notifications.models import NotificationMessage
+from app.notifications.opportunity import opportunity_fields
 
 EMOJI: dict[EventType, str] = {
     EventType.MARKET_SIGNAL_QUALIFIED: "📈",
@@ -71,8 +72,30 @@ def format_event(event: Event) -> NotificationMessage:
         occurred_at=event.occurred_at,
         key=event.key,
         routing_key=event.routing_key,
-        fields={k: _scalar(v) for k, v in payload.items() if not isinstance(v, list | dict)},
+        fields=_fields_for(event, payload),
     )
+
+
+def _fields_for(event: Event, payload: Mapping[str, Any]) -> dict[str, str]:
+    """Embed fields for an event.
+
+    Market opportunities get a curated, ordered, human-named set -- they are the
+    messages read on a phone while deciding something. Everything else falls back
+    to the scalar payload, which stays legible without needing a bespoke layout
+    per event type.
+    """
+    if event.type in _OPPORTUNITY_EVENTS:
+        return opportunity_fields(payload)
+    return {k: _scalar(v) for k, v in payload.items() if not isinstance(v, list | dict)}
+
+
+_OPPORTUNITY_EVENTS: frozenset[EventType] = frozenset(
+    {
+        EventType.MARKET_SIGNAL_QUALIFIED,
+        EventType.MARKET_SIGNAL_STRENGTHENED,
+        EventType.MARKET_SIGNAL_INVALIDATED,
+    }
+)
 
 
 # ---------------------------------------------------------------------------

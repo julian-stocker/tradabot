@@ -152,3 +152,188 @@ response.
 Slash commands, an interactive bot, reading messages, reacting to them, or any
 path by which Discord could influence trading. Discord is where tradabot *writes*
 what it decided; it is never where a decision comes from.
+
+---
+
+## Channel semantics (phase 5.6)
+
+Each destination answers a different question. Mixing them is what made the
+market channel unreadable.
+
+| Channel | Trigger | Expected frequency | Empty means |
+|---|---|---|---|
+| **market-signals** | opportunity *transitions* only: QUALIFIED, STRONG, WEAKENED, INVALIDATED | rare — 385 qualified in 116,844 observations | **healthy silence** |
+| **paper-100 / -1000 / -10000** | that portfolio's simulated open/close/stop/target | only when a signal qualifies *and* that portfolio can fund it | **healthy silence** |
+| **performance** | daily summary | once per trading day | missing integration |
+| **system** | provider down/recovered, scheduler failure, database problem | rare | **healthy silence** |
+
+## Closed-market silence is a feature
+
+`market-signals` used to emit "No qualified opportunities." every hour, including
+overnight and at weekends. Zero candidates is the *normal* state — roughly 997 of
+every 1,000 scans have nothing to say — so announcing it hourly is the purest
+form of noise, and it trains the reader to ignore the one channel that should
+never be ignored.
+
+`evaluate_overview()` now suppresses on three ordered rules:
+
+1. **market closed** (weekend, holiday, out of hours) — nothing has changed since
+   the close and nothing can until the open;
+2. **extended hours** — the scanner refuses to qualify setups on pre/post-market
+   IEX prints, so an overview then can only ever say zero;
+3. **zero candidates** — not news.
+
+Closed-market status belongs in the daily summary, which is a report, not an
+alert.
+
+```
+$ python -m app.cli scanner overview
+overview suppressed: pre_market cannot qualify signals
+(silence here is healthy -- see docs/discord.md)
+```
+
+None of this suppresses a *transition*: a signal newly qualifying still notifies.
+
+## Embeds
+
+Messages render as Discord embeds with a severity-coloured spine and a field
+grid, with the **plaintext body always sent alongside** — a client that renders
+no embed still shows everything. Disable with `TRADABOT_DISCORD__USE_EMBEDS=false`;
+presentation degrades, information does not.
+
+**No field is ever fabricated.** tradabot has no price targets, no support and
+resistance levels and no probability estimates, so an embed never shows them. A
+value that is absent is omitted, because a field labelled "Target" that came from
+nowhere is worse than no field — the reader cannot tell the difference.
+
+## Manual lifecycle demo
+
+```bash
+make notify-demo
+# or: python -m app.cli notifications demo-lifecycle
+```
+
+Sends 13 clearly-marked messages — WATCH, QUALIFIED, STRONG, WEAKENED, a
+simulated open and close for each portfolio, provider failure and recovery, and a
+daily summary — to every destination.
+
+Every message is prefixed `🧪 TEST` and uses the fake ticker `DEMOX`, never a real
+symbol: a synthetic STRONG opportunity that reads like a real one is a message
+somebody acts on, and using NVDA would leave fabricated NVDA alerts in the
+channel history indistinguishable from real ones.
+
+It **writes nothing** — no evaluation, no tracked signal, no position, no trade,
+no research row — and is never scheduled or invoked by a test.
+
+## Future channels (prepared, not created)
+
+Phase 5.7 may add `watch-opportunities`, `buy-opportunities` and
+`sell-exit-signals`. The routing layer already carries a `routing_key` per event,
+so adding them is configuration rather than surgery. Semantics are fixed now to
+avoid conflation later:
+
+| Feed | Meaning |
+|---|---|
+| WATCH | developing setup, **below** threshold — not a trade signal |
+| BUY | qualified bullish setup under the production policy |
+| SELL/EXIT | **three distinct things**: exiting a bullish thesis · taking profit at a target · an independent bearish setup |
+
+Those three must never be merged: "close the position" and "go short" are
+opposite instructions that happen to share a direction of trade.
+
+No webhook is required yet and `.env` is untouched.
+
+---
+
+## The live opportunity message
+
+Since phase 5.6 the **live scanner path** emits this — not a demo, not a mock.
+`_notification_payload` builds it from the evaluation that was just persisted, so
+the message and the stored row cannot disagree.
+
+```
+🚀 STRONG BULLISH — STRENGTHENED
+
+  Company        NVIDIA Corporation Common Stock
+  State          STRONG
+  Direction      BULLISH
+  Score          87.1 / 100
+  Confidence     82%
+  Price          182.45
+  Bid            182.40      Ask   182.50
+
+  Intraday       BULLISH
+  Short term     BULLISH
+  Medium term    BULLISH
+  Long term      NOT AVAILABLE
+
+  Trend          UP
+  Momentum       positive
+  Volume         surging (2.4x)
+  Structure      BREAKOUT
+  Volatility     normal (31%)
+  Liquidity      normal (5.5 bps)
+
+  Data           2026-08-12 15:30 UTC
+  Freshness      0 min old (OK)
+  Source         alpaca / iex
+```
+
+Ordered identity → verdict → horizons → components → freshness, so the first
+screenful answers "what, how strong, over what period".
+
+**`Long term: NOT AVAILABLE` is shown deliberately.** Omitting it would let a
+reader assume the horizon was merely neutral. See
+[signal-intelligence.md](signal-intelligence.md).
+
+### What can never appear
+
+No support, resistance, price target, entry zone, expected price or long-term
+forecast. tradabot computes none of them, so no field can claim them —
+`_notification_payload` has no key for any of them, and a test asserts it stays
+that way.
+
+`Confidence` renders as a percentage because it is stored as a 0–1 fraction — a
+scale this codebase's own analysis misread once.
+
+## Future feeds: ready, and inert
+
+`app/notifications/feeds.py` defines the vocabulary so the split is configuration
+rather than surgery:
+
+| Feed key | Lifecycle | Status |
+|---|---|---|
+| `buy-opportunities` | QUALIFIED / STRONG, bullish | ready |
+| `sell-exit-signals` | WEAKENED / INVALIDATED | ready |
+| `watch-opportunities` | — | **NOT_IMPLEMENTED** |
+
+**Feed keys fall back to `market-signals` when no webhook is configured**, so
+nothing changes until you create one. Portfolio keys deliberately do *not* fall
+back: merging one portfolio's trades into a shared channel would misattribute
+them, and a wrong number is worse than a missing one.
+
+### Why WATCH is not implemented
+
+The obvious definition — "score just below 75" — is exactly what the research
+argues against. **The 70–75 band is the worst in the dataset**: 49.0% positive at
+1d and 47.9% at 5d, both *below* the 51.6% baseline. A WATCH channel built on it
+would promote the weakest evidence available.
+
+The alternatives were measured too, and none discriminates: every component sits
+within about ±1.5pp of the base rate, and volume and breakout confirmation add
+least. So the routing is ready and the policy returns `NOT_IMPLEMENTED` rather
+than inventing weak behaviour. The 75 threshold is untouched.
+
+### SELL/EXIT is not "sell"
+
+Three things get conflated under that word and only two are supported:
+
+| | Supported |
+|---|---|
+| exit a long thesis (setup broke) | yes |
+| take profit / rule-based exit | yes |
+| open a short (independent bearish) | **no — production is long-only** |
+
+The first two concern a position you hold; the third is a new position in the
+opposite direction. `HEADLINES[SELL_EXIT]` reads "EXIT SIGNAL — long thesis
+weakened", and a test asserts the word "short" never appears in it.

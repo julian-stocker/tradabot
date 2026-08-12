@@ -12,6 +12,7 @@ nothing and structural typing keeps test doubles trivial.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -138,6 +139,40 @@ class CandleData(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class AssetMetadata:
+    """Authoritative identity for one instrument, as a provider reports it.
+
+    Provider-neutral by design: a MIC and a company name mean the same thing for
+    a Xetra listing as for a NYSE one, so a future European or Japanese provider
+    fills this in without a schema change. Only ``symbol`` is required -- every
+    other field is omitted rather than guessed when the source does not carry it.
+    """
+
+    symbol: str
+    name: str | None = None
+    exchange: str | None = None
+    """Market Identifier Code (ISO 10383): XNYS, XNAS, XETR, XTKS."""
+    currency: str | None = None
+    country: str | None = None
+    tradable: bool = True
+
+
+@runtime_checkable
+class AssetCatalogue(Protocol):
+    """A provider that can describe instruments, not merely price them.
+
+    Separate from :class:`MarketDataProvider` because the capabilities are
+    genuinely separate: a feed can deliver perfect candles and know nothing about
+    company names or listing venues, which is exactly the situation tradabot was
+    in when every instrument claimed to be on XNAS.
+    """
+
+    async def get_asset_metadata(self, symbols: Sequence[str]) -> dict[str, AssetMetadata]:
+        """Identity for each symbol the catalogue knows. Unknown symbols are omitted."""
+        ...
 
 
 @runtime_checkable

@@ -362,6 +362,8 @@ Details, entry criteria and explicit non-goals: [docs/roadmap.md](docs/roadmap.m
 - [docs/paper-trading.md](docs/paper-trading.md) — order/position lifecycle, accounting, exits, gaps
 - [docs/simulation-timing.md](docs/simulation-timing.md) — execution timing and no-look-ahead rules
 - [docs/roadmap.md](docs/roadmap.md) — phased plan
+- [docs/signal-intelligence.md](docs/signal-intelligence.md) — opportunities, episodes, horizons, attribution
+- [docs/providers.md](docs/providers.md) — instrument identity, US-only limitation, international requirements
 - [docs/storage-planning.md](docs/storage-planning.md) — measured bytes/row, growth projections, SQLite limits
 - [docs/historical-expansion.md](docs/historical-expansion.md) — provider depth, chunking, resume, gap classification
 - [docs/backtesting.md](docs/backtesting.md) — the replay engine, execution convention, bias constraints

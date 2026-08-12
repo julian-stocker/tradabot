@@ -28,6 +28,8 @@ from app.core.config import DiscordSettings
 from app.core.events import EventCategory
 from app.core.logging import get_logger
 from app.core.redaction import redact, safe_message
+from app.notifications.embeds import build_payload
+from app.notifications.feeds import FeedKey
 from app.notifications.models import DeliveryResult, NotificationMessage
 
 logger = get_logger(__name__)
@@ -39,6 +41,18 @@ _RETRYABLE_STATUS: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
 
 # Discord's own hard cap. The configured limit sits below it; this is the wall.
 DISCORD_CONTENT_LIMIT: Final = 2000
+
+
+def _is_feed_key(routing_key: str) -> bool:
+    """Whether a routing key names a future opportunity feed.
+
+    Feed keys describe *what kind of message* this is; portfolio keys describe
+    *whose money it concerns*. Only the first is safe to fall back.
+    """
+    return routing_key in _FEED_KEYS
+
+
+_FEED_KEYS: frozenset[str] = frozenset(key.value for key in FeedKey)
 
 
 class DiscordWebhookNotifier:
@@ -80,11 +94,22 @@ class DiscordWebhookNotifier:
 
         Returning ``None`` rather than raising lets an operator configure the
         channels they care about and leave the rest empty.
+
+        **Feed keys fall back; portfolio keys do not.** An unconfigured
+        ``buy-opportunities`` sends the message to the market channel, which is
+        exactly where it goes today -- so the semantic split can be introduced
+        before any webhook exists. An unconfigured ``paper-100`` stays silent
+        instead, because merging one portfolio's trades into a shared channel
+        would misattribute them, and a wrong number is worse than a missing one.
         """
         if routing_key is not None:
             secret = self._settings.webhook_for_portfolio(routing_key)
             url = secret.get_secret_value().strip() if secret is not None else ""
-            return url or None
+            if url:
+                return url
+            if not _is_feed_key(routing_key):
+                return None
+            # Fall through to the category default.
 
         default = {
             EventCategory.MARKET: self._settings.market_webhook,
@@ -109,7 +134,11 @@ class DiscordWebhookNotifier:
             )
 
         payload: dict[str, Any] = {
-            "content": message.rendered(self._max_characters),
+            **build_payload(
+                message,
+                max_characters=self._max_characters,
+                use_embeds=self._settings.use_embeds,
+            ),
             "username": self._settings.username,
             # Suppress @everyone/@here even if a formatter or a symbol name ever
             # produces one. A monitoring channel must not be able to ping a room.

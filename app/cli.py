@@ -34,6 +34,8 @@ from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
+from app.notifications.demo import lifecycle_events
+from app.notifications.policy import evaluate_overview
 from app.notifications.repository import NotificationRepository
 from app.notifications.service import NotificationService
 from app.notifications.summary import build_daily_summary, daily_summary_already_sent
@@ -723,18 +725,92 @@ async def _scanner_candidates(settings: Settings, limit: int) -> int:
         await engine.dispose()
 
 
+async def _notifications_demo_lifecycle(settings: Settings) -> int:
+    """Send one clearly-marked synthetic message to every destination.
+
+    **Only ever runs when a human types it.** It is not scheduled, not invoked by
+    any test, and writes nothing: no evaluation, no tracked signal, no position,
+    no trade. Every message is prefixed TEST and uses a fake ticker, so nothing
+    it produces can be mistaken later for a real opportunity.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        service = NotificationService(settings, session_factory=factory)
+        pairs = lifecycle_events(settings)
+        print(f"sending {len(pairs)} clearly-marked TEST messages")
+        delivered = 0
+        for destination, event in pairs:
+            ok = await service.publish(event)
+            delivered += 1 if ok else 0
+            print(f"  {'ok ' if ok else 'FAIL'} {destination:<12} {event.type.value}")
+        print(f"{delivered}/{len(pairs)} delivered")
+        print("no evaluation, position, trade or research row was written")
+        return 0 if delivered == len(pairs) else 1
+    finally:
+        await engine.dispose()
+
+
+async def _refresh_identity(settings: Settings) -> int:
+    """Replace placeholder instrument metadata with the provider's own.
+
+    Read-only: it calls Alpaca's asset endpoint and nothing else. No order is
+    placed, and none can be -- see `AlpacaMarketDataProvider.get_asset_metadata`.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        provider = build_provider(settings)
+        async with session_scope(factory) as session:
+            symbols = await WatchlistRepository(session).symbols()
+            service = MarketDataImportService(session, provider)
+            report = await service.refresh_identity(symbols)
+
+        if not report.ok:
+            print(f"identity refresh failed: {report.error}")
+            return 1
+        print(report.summary())
+        for change, affected in sorted(report.exchange_changes.items()):
+            print(f"  {change}: {len(affected)} -- {', '.join(sorted(affected)[:8])}")
+        if report.unresolved:
+            print(f"  unresolved: {', '.join(report.unresolved[:10])}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
 async def _scanner_overview(settings: Settings) -> int:
-    """Send the ranked overview to the market channel."""
+    """Send the ranked overview to the market channel -- when there is one.
+
+    This job runs hourly from launchd. It used to publish unconditionally, which
+    meant "No qualified opportunities." every hour of every weekend. Zero
+    candidates is the normal state (385 qualified out of 116,844 observations in
+    the phase-5.5 benchmark), so the decision of whether to speak belongs in the
+    notification policy alongside every other suppression rule.
+    """
     engine = create_engine(settings)
     factory = create_session_factory(engine)
     try:
         scanner = _build_scanner(settings, factory)
         candidates = await scanner.top_candidates()
+
+        calendar = get_trading_calendar(settings.market_data.default_exchange)
+        now = utc_now()
+        decision = evaluate_overview(
+            candidate_count=len(candidates),
+            session=session_phase(calendar, now),
+            require_regular_session=settings.scanner.require_regular_session,
+        )
+        if not decision.should_publish:
+            print(f"overview suppressed: {decision.reason}")
+            print("(silence here is healthy -- see docs/discord.md)")
+            return 0
+
         service = NotificationService(settings, session_factory=factory)
         await service.publish(
             Event(
                 type=EventType.MARKET_OVERVIEW,
-                occurred_at=utc_now(),
+                occurred_at=now,
                 payload={
                     "candidates": [
                         {
@@ -749,9 +825,7 @@ async def _scanner_overview(settings: Settings) -> int:
                 },
             )
         )
-        print(f"\noverview sent with {len(candidates)} candidates")
-        if not candidates:
-            print("(reported honestly as 'no qualified opportunities')")
+        print(f"overview sent with {len(candidates)} candidates")
         return 0
     finally:
         await engine.dispose()
@@ -1062,6 +1136,7 @@ def _run_scanner(settings: Settings, args: argparse.Namespace) -> int:
 
     simple: dict[str, Callable[[Settings], Any]] = {
         "sync": _scanner_sync,
+        "refresh-identity": _refresh_identity,
         "overview": _scanner_overview,
         "daily-summary": _notifications_daily_summary,
         "demo": _scanner_demo,
@@ -1077,6 +1152,8 @@ def _run_notifications(settings: Settings, args: argparse.Namespace) -> int:
         return asyncio.run(_notifications_status(settings))
     if command == "daily-summary":
         return asyncio.run(_notifications_daily_summary(settings))
+    if command == "demo-lifecycle":
+        return asyncio.run(_notifications_demo_lifecycle(settings))
     return asyncio.run(_notifications_test(settings, args.category))
 
 
@@ -1261,6 +1338,10 @@ def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: igno
     scanner = sub.add_parser("scanner", help="Continuous market scanner")
     scanner_sub = scanner.add_subparsers(dest="scanner_command", required=True)
     scanner_sub.add_parser("sync", help="Incrementally sync watchlist market data")
+    scanner_sub.add_parser(
+        "refresh-identity",
+        help="Replace placeholder instrument metadata with the provider's (read-only)",
+    )
     runner = scanner_sub.add_parser("run-once", help="Run one scan cycle")
     runner.add_argument("--no-paper", action="store_true", help="Skip paper-trading decisions")
     candidates = scanner_sub.add_parser("candidates", help="Show ranked current candidates")
@@ -1409,6 +1490,10 @@ def _build_parser() -> argparse.ArgumentParser:
     notify = sub.add_parser("notifications", help="Notification delivery")
     notify_sub = notify.add_subparsers(dest="notification_command", required=True)
     notify_sub.add_parser("status", help="Show configuration and delivery outcomes")
+    notify_sub.add_parser(
+        "demo-lifecycle",
+        help="Send clearly-marked TEST messages to every destination (manual only)",
+    )
     tester = notify_sub.add_parser("test", help="Send a labelled TEST message to each channel")
     tester.add_argument(
         "--category", choices=[c.value for c in EventCategory], help="Limit to one channel"

@@ -123,6 +123,29 @@ class ImportReport:
 
 
 @dataclass
+class IdentityReport:
+    """What an identity refresh changed."""
+
+    looked_up: int = 0
+    resolved: int = 0
+    names_updated: int = 0
+    exchanges_updated: int = 0
+    unresolved: list[str] = field(default_factory=list)
+    exchange_changes: dict[str, list[str]] = field(default_factory=dict)
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    def summary(self) -> str:
+        return (
+            f"{self.resolved}/{self.looked_up} resolved; "
+            f"{self.names_updated} names, {self.exchanges_updated} exchanges updated"
+        )
+
+
+@dataclass
 class SyncReport:
     """Outcome of synchronising a set of symbols."""
 
@@ -529,6 +552,52 @@ class MarketDataImportService:
             reports.append(item)
 
         return reports
+
+    async def refresh_identity(self, symbols: Sequence[str]) -> IdentityReport:
+        """Replace placeholder instrument metadata with the provider's own.
+
+        Fixes a real defect: every instrument was seeded with ``name=symbol`` and
+        ``exchange=<configured default>``, so JPM, KO and XOM were all recorded
+        as XNAS despite being NYSE-listed. The exchange feeds calendar selection,
+        which today is harmless (both US venues share sessions) and stops being
+        harmless the moment a non-US listing exists.
+
+        Only fields the catalogue actually reports are written. ``listed_at``,
+        ``delisted_at`` and ISIN are **left alone**: Alpaca's asset endpoint does
+        not carry them, and a guessed listing date is worse than a null one.
+        """
+        report = IdentityReport()
+        catalogue = getattr(self._provider, "get_asset_metadata", None)
+        if catalogue is None:
+            report.error = f"provider {self._provider.name} has no asset catalogue"
+            return report
+
+        metadata = await catalogue([s.upper() for s in symbols])
+        report.looked_up = len(symbols)
+        report.resolved = len(metadata)
+
+        for symbol in (s.upper() for s in symbols):
+            instrument = await self._instruments.get_by_symbol(symbol)
+            if instrument is None:
+                continue
+            found = metadata.get(symbol)
+            if found is None:
+                report.unresolved.append(symbol)
+                continue
+
+            if found.name and found.name != instrument.name:
+                instrument.name = found.name
+                report.names_updated += 1
+            if found.exchange and found.exchange != instrument.exchange:
+                report.exchanges_updated += 1
+                report.exchange_changes.setdefault(
+                    f"{instrument.exchange}->{found.exchange}", []
+                ).append(symbol)
+                instrument.exchange = found.exchange
+            instrument.provider = self._provider.name
+            instrument.provider_symbol = symbol
+
+        return report
 
     async def _finish_sync(
         self, report: SyncReport, *, started: datetime, now: datetime | None
