@@ -96,6 +96,9 @@ class EventType(StrEnum):
     MARKET_SIGNAL_STRENGTHENED = "MarketSignalStrengthened"
     MARKET_SIGNAL_INVALIDATED = "MarketSignalInvalidated"
     MARKET_OVERVIEW = "MarketOverview"
+    MARKET_TRENDS = "MarketTrends"
+    """Descriptive market activity. **Never a recommendation** -- see
+    :mod:`app.notifications.trends`."""
 
     # -- Paper trading -----------------------------------------------------
     PAPER_TRADE_OPENED = "PaperTradeOpened"
@@ -111,6 +114,10 @@ class EventType(StrEnum):
     TRADABOT_STOPPED = "TradabotStopped"
     CRITICAL_SYSTEM_ERROR = "CriticalSystemError"
     NOTIFICATION_TEST = "NotificationTest"
+    OPERATIONAL_STATUS = "OperationalStatus"
+    """The #status dashboard. A heartbeat, not an alert -- failures still go to
+    the system channel, and a dashboard that also alerted would mean an operator
+    watching two channels for the same fact."""
 
 
 EVENT_CATEGORIES: dict[EventType, EventCategory] = {
@@ -123,10 +130,12 @@ EVENT_CATEGORIES: dict[EventType, EventCategory] = {
     EventType.TRADABOT_STOPPED: EventCategory.SYSTEM,
     EventType.CRITICAL_SYSTEM_ERROR: EventCategory.SYSTEM,
     EventType.NOTIFICATION_TEST: EventCategory.SYSTEM,
+    EventType.OPERATIONAL_STATUS: EventCategory.SYSTEM,
     EventType.MARKET_SIGNAL_QUALIFIED: EventCategory.MARKET,
     EventType.MARKET_SIGNAL_STRENGTHENED: EventCategory.MARKET,
     EventType.MARKET_SIGNAL_INVALIDATED: EventCategory.MARKET,
     EventType.MARKET_OVERVIEW: EventCategory.MARKET,
+    EventType.MARKET_TRENDS: EventCategory.MARKET,
     EventType.PAPER_TRADE_OPENED: EventCategory.PAPER_TRADE,
     EventType.PAPER_TRADE_CLOSED: EventCategory.PAPER_TRADE,
     EventType.PAPER_TRADE_SKIPPED: EventCategory.PAPER_TRADE,

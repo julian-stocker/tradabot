@@ -245,7 +245,28 @@
       "Bash(.venv/bin/mypy app/core/config.py --strict)",
       "Bash(awk '{print \"  .env last modified:\", $6, $7, $8}')",
       "Bash(sqlite3 tradabot.db \"SELECT COUNT\\(*\\) FROM sqlite_master WHERE type='table';\")",
-      "Bash(.venv/bin/mypy app/notifications/trends.py --strict)"
+      "Bash(.venv/bin/mypy app/notifications/trends.py --strict)",
+      "Bash(sqlite3 tradabot.db \"SELECT trend_metrics, momentum_metrics, volume_metrics, volatility_metrics, structure_metrics FROM signal_evaluations WHERE backtest_run_id IS NULL ORDER BY id DESC LIMIT 1;\")",
+      "Bash(python3 -c ' *)",
+      "Bash(sqlite3 tradabot.db \"SELECT json_extract\\(structure_metrics,'\\\\$.state'\\) s, count\\(*\\) FROM signal_evaluations WHERE backtest_run_id IS NULL GROUP BY s;\")",
+      "Bash(.venv/bin/mypy app/notifications/dashboard.py --strict)",
+      "Bash(.venv/bin/mypy app/notifications/repository.py --strict)",
+      "Bash(sed -n '/^def _run_scanner/,/^def _run_notifications/p' app/cli.py)",
+      "Bash(sed -n '/^def _run_ops/,/^def _run_watchlist/p' app/cli.py)",
+      "Bash(awk '{print $9, $6, $7, $8}')",
+      "Bash(plutil -p ~/Library/LaunchAgents/com.tradabot.trends.plist)",
+      "Bash(make trends-preview *)",
+      "Bash(make status-preview *)",
+      "Bash(sqlite3 -cmd \".timeout 30000\" -header -column tradabot.db \"SELECT id, replay_mode, status, observation_count FROM backtest_runs ORDER BY id DESC LIMIT 3;\")",
+      "Bash(ps -o pid,etime,%cpu,rss,command -p 63042)",
+      "Bash(sqlite3 -cmd \".timeout 30000\" -header -column tradabot.db \"SELECT backtest_run_id, count\\(*\\) FROM signal_evaluations GROUP BY backtest_run_id;\")",
+      "Bash(kill 63042)",
+      "Bash(kill -9 63042)",
+      "Bash(sqlite3 -cmd '.timeout 30000' tradabot.db ' *)",
+      "Bash(sqlite3 -cmd \".timeout 30000\" tradabot.db \"PRAGMA integrity_check;\")",
+      "Bash(sqlite3 -cmd '.timeout 30000' -header -column tradabot.db ' *)",
+      "Bash(awk '{print \"DB:\", $5}')",
+      "Bash(awk 'NR==2{print \"free:\", $4}')"
     ]
   }
 }

@@ -337,3 +337,88 @@ Three things get conflated under that word and only two are supported:
 The first two concern a position you hold; the third is a new position in the
 opposite direction. `HEADLINES[SELL_EXIT]` reads "EXIT SIGNAL — long thesis
 weakened", and a test asserts the word "short" never appears in it.
+
+## #market-trends and #status, running (phase 5.8.2)
+
+Phase 5.8.1 built both and wired neither. This phase makes them run, as **two
+new launchd jobs** rather than tails appended to the scan cycle:
+
+| Job | Command | Interval | Reads |
+|-----|---------|----------|-------|
+| `com.tradabot.trends` | `scanner trends` | 15 min | `signal_evaluations` + stored daily candles |
+| `com.tradabot.status` | `ops status-publish` | 15 min | `operational_status` + `alembic_version` |
+
+**Neither calls a market-data provider.** Both read what the sync and scan jobs
+already persisted, which is the same reasoning behind `scanner overview`: a
+summary is a view of what the last scan found, and refetching would answer a
+different question at the cost of API quota.
+
+They are separate *processes* on purpose. A `try/except` around a Discord call
+contains an exception but not a hang, and a stalled HTTP request inside the scan
+cycle would hold the scan lease past the next due scan. Nothing the trends job
+does can reach the scanner, research persistence or paper trading.
+
+### Session policy for trends
+
+| Session | Behaviour | Why |
+|---------|-----------|-----|
+| REGULAR | active | |
+| PRE_MARKET / AFTER_HOURS | silent | IEX prints too thin — a "volume spike" off a handful of trades measures the feed, not the market (phase 4 saw 883–1118 bps spreads) |
+| CLOSED / WEEKEND / HOLIDAY | silent | nothing new happened |
+
+An event fires once, stays quiet for a 4-hour cooldown while it persists, and
+speaks again only if the move extends by ≥2pp. **There is no "nothing notable"
+message.** Zero events sends nothing, and that is the normal state.
+
+Observations older than two hours are not announced at all: if the scanner has
+been down since morning, "NVDA is up 4%" may have stopped being true.
+
+### What ONLINE / DEGRADED / OFFLINE actually mean
+
+- **ONLINE** — sync and scan both ran inside their freshness windows.
+- **DEGRADED** — one is late, an error is recorded, or notification delivery is
+  currently failing.
+- **OFFLINE** — nothing has ever run, or everything is far past its window.
+
+**The limitation, stated plainly: a dead process cannot post 🔴 OFFLINE.** If the
+whole installation stops, #status does not turn red — it stops updating. The
+`Checked` timestamp is therefore the real liveness signal, which is why the
+heartbeat republishes every 15 minutes even when nothing changed, and why that
+note is printed in the message itself.
+
+While the market is closed the freshness windows widen 4× rather than switching
+off. A laptop that dozes for an hour on a Saturday is ordinary; a scheduler dead
+for six hours still shows through.
+
+### The dashboard is edited, not reposted
+
+First publication POSTs with `?wait=true` and stores the returned message id in
+`notification_state` (`scope='dashboard'`). Every later publication PATCHes that
+message. **The webhook URL is never persisted** — the id alone grants nothing.
+If the edit is rejected (message deleted, webhook rotated) the next run posts a
+fresh message and stores the new id, so the worst case is one extra message.
+
+Republication happens on a real content change or on the 15-minute heartbeat.
+Time-derived fields (`Checked`, `Last sync`, `Last scan`, `Last delivery`) are
+excluded from the change fingerprint — they move every tick without anything
+having changed, and including them would republish constantly and defeat the
+whole design. The stable field beside each of them still catches real changes.
+
+### Commands
+
+```bash
+make trends-preview    # what #market-trends would say. Sends nothing.
+make status-preview    # renders the dashboard locally. Sends nothing.
+
+make trends-test       # SENDS A REAL MESSAGE, clearly marked TEST, constructed symbols
+make status-test       # SENDS A REAL MESSAGE: forces a refresh of the existing dashboard
+```
+
+Previews use the same code path the scheduler runs (`evaluate` / `render`, the
+read-only halves), so they cannot reassure you about a message they did not
+produce. `trends-test` writes no state, so a test cannot silence a real
+observation by starting its cooldown.
+
+Missing `TRADABOT_DISCORD__TRENDS_WEBHOOK` or `__STATUS_WEBHOOK` means silence,
+never a fallback: neither is a feed key, so an unconfigured destination cannot
+spill trend text or a self-editing dashboard into #market-signals.

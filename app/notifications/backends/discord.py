@@ -174,6 +174,15 @@ class DiscordWebhookNotifier:
                 response = await self._request(f"{url}/messages/{message_id}", payload, patch=True)
                 if response.status_code < 300:  # noqa: PLR2004
                     return message_id
+                # Rejected rather than raised: the message was deleted (404), or
+                # the webhook was rotated and no longer owns it (401/403).
+                # **Logged, not silent.** A recreate that happens every heartbeat
+                # is #status spamming itself, and without this line the log would
+                # show a healthy publication each time and never say why.
+                logger.info(
+                    "dashboard edit rejected; recreating",
+                    status=response.status_code,
+                )
             except Exception as exc:
                 logger.info("dashboard edit failed; recreating", error=safe_message(exc))
 

@@ -19,7 +19,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
+SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)
 
 
@@ -64,8 +64,14 @@ def _configure_sqlite(engine: AsyncEngine) -> None:
     candles blocks a sync writing them, and one of the two fails.
 
     **busy_timeout** makes a contended write *wait* instead of raising
-    immediately. Five seconds is far longer than any transaction here and much
-    shorter than a scheduling interval.
+    immediately. It was five seconds, on the stated assumption that this was
+    "far longer than any transaction here" -- and phase 5.9 broke that
+    assumption. A historical replay commits observations in bulk while the
+    scheduler is running, and the five-minute sync began failing its lease
+    acquisition with `database is locked`. Thirty seconds comfortably exceeds a
+    bulk commit and is still an order of magnitude below the shortest scheduling
+    interval, so a genuinely stuck writer still surfaces as an error rather than
+    hanging a job until its next tick.
 
     **synchronous=NORMAL** is the standard pairing with WAL: durable against a
     process crash, which is the failure that actually happens, while not fsyncing

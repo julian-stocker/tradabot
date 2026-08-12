@@ -40,6 +40,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -98,6 +99,26 @@ class BacktestRun(Base):
     label_policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
     engine_version: Mapped[str] = mapped_column(String(32), nullable=False)
 
+    replay_mode: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        server_default="PRODUCTION_FAITHFUL",
+        doc="Which timeframes the window actually had -- see app.backtesting.modes. "
+        "**Derived from stored coverage, never declared by the caller.** A "
+        "COARSE_HISTORICAL run scores from 1h alone, exactly as a faithful one "
+        "does, so score bands stay comparable; but `qualified` and `aligned` are "
+        "structurally false there and comparing them across modes is a category "
+        "error rather than a small bias.",
+    )
+    available_timeframes: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("''"),
+        doc="Comma-separated timeframes that actually covered the window. The "
+        "evidence behind `replay_mode`, kept so the verdict can be audited "
+        "without re-measuring coverage that has since changed.",
+    )
+
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="RUNNING")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -110,6 +131,10 @@ class BacktestRun(Base):
     __table_args__ = (
         Index("ix_backtest_runs_started_at", "started_at"),
         Index("ix_backtest_runs_status", "status"),
+        # Analyses filter on the mode constantly -- mixing a coarse run into a
+        # production-faithful comparison is the error this column exists to
+        # prevent, so the filter must be cheap enough that nobody omits it.
+        Index("ix_backtest_runs_replay_mode", "replay_mode"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debugging aid

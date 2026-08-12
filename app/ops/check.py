@@ -26,6 +26,7 @@ from app.notifications.repository import NotificationRepository
 from app.ops.launchd import launchctl_available, scheduled_jobs
 from app.ownership.service import OwnershipService
 from app.paper.repository import PaperTradingRepository
+from app.scanner.enums import SessionPhase
 from app.scanner.repository import (
     SCOPE_SCAN,
     SCOPE_SYNC,
@@ -242,6 +243,8 @@ def _check_scheduler(settings: Settings, report: CheckReport) -> None:
         scan_minutes=settings.scanner.scan_interval_minutes,
         sync_minutes=settings.scanner.market_sync_interval_minutes,
         overview_minutes=settings.scanner.overview_interval_minutes,
+        trends_minutes=settings.scanner.trends_interval_minutes,
+        status_minutes=settings.scanner.status_interval_minutes,
     )
     if not launchctl_available():
         report.add(
@@ -279,6 +282,17 @@ class OperationalStatus:
 
     checked_at: datetime
     session_phase: str
+    """Human-readable, e.g. "REGULAR at 18:12 UTC". For display only."""
+
+    session: SessionPhase = SessionPhase.CLOSED
+    """The phase itself.
+
+    Kept beside the rendered string rather than instead of it: the dashboard has
+    to *decide* on the session (freshness windows widen while the market is shut)
+    and re-parsing prose to do that would break the first time the wording
+    changed -- silently, and only on weekends.
+    """
+
     last_sync: datetime | None = None
     last_scan: datetime | None = None
     last_scan_status: str | None = None
@@ -302,9 +316,18 @@ class OperationalStatus:
     evaluations_stored: int = 0
 
 
-async def operational_status(session: AsyncSession, settings: Settings) -> OperationalStatus:
-    """Assemble the operational picture. Contains no secret."""
-    now = utc_now()
+async def operational_status(
+    session: AsyncSession, settings: Settings, *, now: datetime | None = None
+) -> OperationalStatus:
+    """Assemble the operational picture. Contains no secret.
+
+    ``now`` is injectable so a caller that is reasoning about one instant --
+    the dashboard, which measures ages against it -- gets a session phase from
+    that same instant. Reading the wall clock here while the caller used its own
+    moment produced a picture assembled from two different times, which is
+    invisible in production (they agree) and unrepeatable in a test.
+    """
+    moment = now or utc_now()
     calendar = get_trading_calendar(settings.market_data.default_exchange)
 
     runs = ScanRunRepository(session)
@@ -346,7 +369,7 @@ async def operational_status(session: AsyncSession, settings: Settings) -> Opera
         )
 
     return OperationalStatus(
-        checked_at=now,
+        checked_at=moment,
         universe_size=len(universe_symbols()),
         watchlist_size=await WatchlistRepository(session).count(),
         last_sync_duration=sync.duration_seconds if sync else None,
@@ -357,7 +380,8 @@ async def operational_status(session: AsyncSession, settings: Settings) -> Opera
         last_scan_qualified=scan.signals_qualified if scan else 0,
         last_scan_strong=scan.signals_strong if scan else 0,
         evaluations_stored=await SignalEvaluationRepository(session).count(),
-        session_phase=describe_phase(session_phase(calendar, now), now),
+        session_phase=describe_phase(session_phase(calendar, moment), moment),
+        session=session_phase(calendar, moment),
         last_sync=sync.started_at if sync else None,
         last_scan=scan.started_at if scan else None,
         last_scan_status=scan.status if scan else None,
@@ -366,5 +390,5 @@ async def operational_status(session: AsyncSession, settings: Settings) -> Opera
         last_notification_success=last_ok,
         last_notification_failure=last_fail,
         portfolios=portfolios,
-        session_closed=is_after_close(calendar, now),
+        session_closed=is_after_close(calendar, moment),
     )

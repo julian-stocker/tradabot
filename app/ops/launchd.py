@@ -62,14 +62,27 @@ def scheduled_jobs(
     sync_minutes: int = 5,
     overview_minutes: int = 60,
     summary_minutes: int = 60,
+    trends_minutes: int = 15,
+    status_minutes: int = 15,
 ) -> tuple[ScheduledJob, ...]:
-    """The four jobs, at the configured cadence.
+    """The six jobs, at the configured cadence.
 
     The daily summary runs hourly and decides for itself whether the session has
     closed -- see :mod:`app.ops.status`. Pinning it to a wall-clock time would
     bake in a timezone and break twice a year on US daylight-saving transitions,
     which is exactly the kind of bug that shows up as a missing report rather
     than an error.
+
+    Why trends and status are separate jobs
+    ---------------------------------------
+    Neither fetches market data; both read what sync and scan already persisted.
+    They are separate **processes** rather than tails appended to the scan cycle
+    because process isolation is the only kind that survives a hang. A ``try``
+    block around a Discord call contains an exception; it does not stop a stalled
+    HTTP request from holding the scan lease while the next scan is due.
+
+    Status additionally *cannot* live inside the scanner: it must keep publishing
+    when the market is closed, which is exactly when a scan has nothing to do.
     """
     return (
         ScheduledJob(
@@ -95,6 +108,18 @@ def scheduled_jobs(
             args=("ops", "daily-summary-if-due"),
             interval_seconds=summary_minutes * 60,
             description="Daily report, session-aware and sent at most once a day",
+        ),
+        ScheduledJob(
+            name="trends",
+            args=("scanner", "trends"),
+            interval_seconds=trends_minutes * 60,
+            description="Descriptive market activity from stored evaluations (no fetch)",
+        ),
+        ScheduledJob(
+            name="status",
+            args=("ops", "status-publish"),
+            interval_seconds=status_minutes * 60,
+            description="Status dashboard heartbeat; edits one message, market open or shut",
         ),
     )
 

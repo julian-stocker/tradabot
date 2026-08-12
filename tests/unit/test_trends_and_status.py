@@ -260,12 +260,21 @@ def test_the_dashboard_covers_every_required_area() -> None:
         assert portfolio in fields
 
 
-def test_absent_values_are_omitted_not_shown_as_zero() -> None:
-    """'No scan recorded' and 'scanned zero symbols' are different situations."""
+def test_absent_values_are_named_not_shown_as_zero() -> None:
+    """'No scan recorded' and 'scanned zero symbols' are different situations.
+
+    Said explicitly rather than left out: a dashboard that silently drops the
+    line makes a fresh installation and a scanner that stopped working look
+    identical, and the second one is the reason anyone opens #status.
+    """
     fields = fields_for(Status(last_scan=None))
 
-    assert "Last scan" not in fields
-    assert "Scan result" not in fields
+    assert fields["Last scan"] == "never"
+    assert "Scan result" not in fields, "there is no result to report"
+
+    empty = fields_for(Status(evaluations_stored=0), candles=None)
+    assert empty["Candles"] == "N/A"
+    assert empty["Evaluations"] == "N/A"
 
 
 def test_the_dashboard_contains_no_secret() -> None:

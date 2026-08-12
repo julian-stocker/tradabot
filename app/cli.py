@@ -34,11 +34,18 @@ from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
+from app.notifications.backends.discord import DiscordWebhookNotifier
+from app.notifications.dashboard import LIVENESS_NOTE
 from app.notifications.demo import lifecycle_events
+from app.notifications.feeds import TRENDS_ROUTING_KEY
 from app.notifications.policy import evaluate_overview
 from app.notifications.repository import NotificationRepository
 from app.notifications.service import NotificationService
+from app.notifications.status_service import StatusService
 from app.notifications.summary import build_daily_summary, daily_summary_already_sent
+from app.notifications.trends import DISCLAIMER, TrendEvent, TrendSignal, rank
+from app.notifications.trends import build_payload as build_trends_payload
+from app.notifications.trends_service import TrendsService
 from app.ops.check import operational_status, run_checks
 from app.ops.launchd import (
     LAUNCH_AGENTS_DIR,
@@ -490,6 +497,8 @@ def _ops_jobs(settings: Settings) -> tuple[ScheduledJob, ...]:
         scan_minutes=settings.scanner.scan_interval_minutes,
         sync_minutes=settings.scanner.market_sync_interval_minutes,
         overview_minutes=settings.scanner.overview_interval_minutes,
+        trends_minutes=settings.scanner.trends_interval_minutes,
+        status_minutes=settings.scanner.status_interval_minutes,
     )
 
 
@@ -831,6 +840,133 @@ async def _scanner_overview(settings: Settings) -> int:
         await engine.dispose()
 
 
+async def _scanner_trends(settings: Settings, *, preview: bool, test: bool) -> int:
+    """Evaluate #market-trends from stored scan data and publish what is new.
+
+    Reads the evaluations the scanner already persisted -- **no provider call**.
+    Zero notable events is the normal outcome and sends nothing; see
+    :mod:`app.notifications.trends` for why silence is the design.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        if test:
+            return await _trends_test(settings, factory)
+
+        notifications = None if preview else NotificationService(settings, session_factory=factory)
+        service = TrendsService(factory, settings=settings, notifications=notifications)
+
+        if preview:
+            run = await service.evaluate()
+            print("\n--- PREVIEW: nothing was sent to Discord ---")
+            print(f"session    : {run.session}")
+            if run.skipped_reason:
+                print(f"suppressed : {run.skipped_reason}")
+                return 0
+            print(f"symbols    : {run.symbols_considered} considered")
+            print(f"notable    : {run.events_detected} event(s)")
+            if not run.signals:
+                print("\nNothing notable. No message would be sent -- that is the healthy state.")
+                return 0
+            print("\nWould send:")
+            for index, signal in enumerate(rank(run.signals), start=1):
+                detail = f"   ({signal.detail})" if signal.detail else ""
+                print(f"  {index}. {signal.symbol:<6} {signal.headline}{detail}")
+            print(f"\n{DISCLAIMER}")
+            print("\n(Cooldown is not applied in a preview; a live run may send fewer.)")
+            return 0
+
+        run = await service.publish()
+        print(f"\ntrends: {run.summary()}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _trends_test(settings: Settings, factory: object) -> int:
+    """Send one clearly-marked TEST message to the trends webhook. **Manual only.**
+
+    Constructed observations with fictional symbols, so nothing here can be read
+    as a claim about a real instrument. Writes no state: the cooldown is
+    untouched, so a test cannot silence a real observation.
+    """
+    if not settings.discord.webhook_for_portfolio(TRENDS_ROUTING_KEY):
+        print("\nno trends webhook configured; set TRADABOT_DISCORD__TRENDS_WEBHOOK")
+        return 1
+
+    service = NotificationService(settings, session_factory=factory)  # type: ignore[arg-type]
+    payload = build_trends_payload(
+        [
+            TrendSignal(
+                symbol="TEST-A",
+                event=TrendEvent.STRONG_MOVE_UP,
+                value=4.2,
+                headline="+4.2% today",
+                detail="5d +8.1%",
+            ),
+            TrendSignal(
+                symbol="TEST-B",
+                event=TrendEvent.VOLUME_SPIKE,
+                value=2.4,
+                headline="volume 2.4x average",
+            ),
+        ],
+        context={"test": True},
+    )
+    payload["title"] = "🧪 TEST — MARKET ACTIVITY"
+    delivered = await service.publish(
+        Event(
+            type=EventType.MARKET_TRENDS,
+            occurred_at=utc_now(),
+            payload=payload,
+            key="trends:test",
+            routing_key=TRENDS_ROUTING_KEY,
+        )
+    )
+    print(
+        f"\ntrends TEST message {'delivered' if delivered else 'NOT delivered'} to #market-trends"
+    )
+    print("Constructed symbols, no state written, no order placed.")
+    return 0 if delivered else 1
+
+
+async def _ops_status_publish(settings: Settings, *, preview: bool, test: bool) -> int:
+    """Refresh the persistent #status dashboard.
+
+    Edits one message rather than posting a new one; publishes on a real change
+    or on the heartbeat, and stays quiet otherwise.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        notifier = None
+        if not preview and settings.discord.enabled and settings.discord.is_configured:
+            notifier = DiscordWebhookNotifier(
+                settings.discord, max_characters=settings.notifications.max_message_characters
+            )
+        service = StatusService(factory, settings=settings, notifier=notifier)
+
+        if preview:
+            fields = await service.render()
+            print("\n--- PREVIEW: nothing was sent to Discord ---")
+            for name, value in fields.items():
+                print(f"  {name:<16} {value}")
+            print(f"\n{LIVENESS_NOTE}")
+            return 0
+
+        run = await service.publish(force=test)
+        if test:
+            print("\n(TEST: forced a refresh of the existing dashboard message.)")
+        if run.error:
+            print(f"\nstatus dashboard not published: {run.error}")
+            return 1
+        verb = "created" if run.created else "updated" if run.published else "unchanged"
+        print(f"\nstatus dashboard {verb} ({run.reason})")
+        return 0
+    finally:
+        await engine.dispose()
+
+
 async def _scanner_demo(settings: Settings) -> int:
     """Deterministic end-to-end scanner demonstration.
 
@@ -1100,6 +1236,8 @@ def _run_ops(settings: Settings, args: argparse.Namespace) -> int:
         return _ops_install(settings)
     if command == "uninstall":
         return _ops_uninstall(settings)
+    if command == "status-publish":
+        return asyncio.run(_ops_status_publish(settings, preview=args.preview, test=args.test))
 
     coroutines: dict[str, Callable[[Settings], Any]] = {
         "check": _ops_check,
@@ -1133,6 +1271,8 @@ def _run_scanner(settings: Settings, args: argparse.Namespace) -> int:
         return asyncio.run(_scanner_run_once(settings, paper=not args.no_paper))
     if command == "candidates":
         return asyncio.run(_scanner_candidates(settings, args.limit))
+    if command == "trends":
+        return asyncio.run(_scanner_trends(settings, preview=args.preview, test=args.test))
 
     simple: dict[str, Callable[[Settings], Any]] = {
         "sync": _scanner_sync,
@@ -1315,6 +1455,17 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
     ops_sub.add_parser(
         "daily-summary-if-due", help="Send the daily report once, after the session closes"
     )
+    publish = ops_sub.add_parser(
+        "status-publish", help="Refresh the persistent #status dashboard (edits one message)"
+    )
+    publish.add_argument(
+        "--preview", action="store_true", help="Render the dashboard and send nothing"
+    )
+    publish.add_argument(
+        "--test",
+        action="store_true",
+        help="Force a refresh even if nothing changed. Sends a REAL message.",
+    )
 
 
 def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -1347,6 +1498,17 @@ def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: igno
     candidates = scanner_sub.add_parser("candidates", help="Show ranked current candidates")
     candidates.add_argument("--limit", type=int, default=5)
     scanner_sub.add_parser("overview", help="Send the ranked market overview")
+    trends = scanner_sub.add_parser(
+        "trends", help="Publish descriptive market activity from stored scan data"
+    )
+    trends.add_argument(
+        "--preview", action="store_true", help="Print what would be sent and send nothing"
+    )
+    trends.add_argument(
+        "--test",
+        action="store_true",
+        help="Send one clearly-marked TEST message with constructed symbols. Sends a REAL message.",
+    )
     scanner_sub.add_parser("status", help="Scanner configuration and last-run state")
     scanner_sub.add_parser("demo", help="Deterministic end-to-end demonstration")
     scanner_sub.add_parser("daily-summary", help="Send the daily report (alias)")

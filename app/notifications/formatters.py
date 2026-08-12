@@ -27,12 +27,15 @@ from typing import Any
 from app.core.events import Event, EventType
 from app.notifications.models import NotificationMessage
 from app.notifications.opportunity import opportunity_fields
+from app.notifications.trends import DISCLAIMER
 
 EMOJI: dict[EventType, str] = {
     EventType.MARKET_SIGNAL_QUALIFIED: "📈",
     EventType.MARKET_SIGNAL_STRENGTHENED: "🚀",
     EventType.MARKET_SIGNAL_INVALIDATED: "📉",
     EventType.MARKET_OVERVIEW: "🔎",
+    EventType.MARKET_TRENDS: "📈",
+    EventType.OPERATIONAL_STATUS: "🖥️",
     EventType.PAPER_TRADE_OPENED: "🟢",
     EventType.PAPER_TRADE_CLOSED: "🔵",
     EventType.PAPER_TRADE_SKIPPED: "⚪",
@@ -86,6 +89,12 @@ def _fields_for(event: Event, payload: Mapping[str, Any]) -> dict[str, str]:
     """
     if event.type in _OPPORTUNITY_EVENTS:
         return opportunity_fields(payload)
+    if event.type is EventType.OPERATIONAL_STATUS:
+        # The dashboard grid *is* the message. It arrives as a dict and would
+        # otherwise be dropped by the scalar filter below, leaving an embed with
+        # a title and no content.
+        grid = payload.get("fields")
+        return {str(k): str(v) for k, v in grid.items()} if isinstance(grid, dict) else {}
     return {k: _scalar(v) for k, v in payload.items() if not isinstance(v, list | dict)}
 
 
@@ -422,6 +431,50 @@ def _format_test(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
     return f"{EMOJI[EventType.NOTIFICATION_TEST]} TRADABOT TEST", "\n".join(lines)
 
 
+def _format_trends(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
+    """Ranked market activity. **Descriptive only.**
+
+    Renders what it is given and nothing more -- no interpretation, no implied
+    action, no score. The disclaimer is appended here rather than by the caller
+    so it cannot be forgotten by a future emitter, and
+    :func:`~app.notifications.trends.assert_no_recommendation_language` checks
+    the finished text at the boundary.
+    """
+    title = str(payload.get("title") or f"{EMOJI[EventType.MARKET_TRENDS]} MARKET ACTIVITY")
+    movers = payload.get("movers")
+    if not isinstance(movers, list) or not movers:
+        # Should be unreachable: the caller does not publish an empty list,
+        # because "nothing notable happened" is not worth a message.
+        return title, DISCLAIMER
+
+    lines: list[str] = []
+    for index, mover in enumerate(movers, start=1):
+        if not isinstance(mover, dict):
+            continue
+        line = f"{index}. **{mover.get('symbol', '?')}**  {mover.get('headline', '')}".rstrip()
+        if mover.get("detail"):
+            line += f"   ({mover['detail']})"
+        lines.append(line)
+
+    lines.extend(("", str(payload.get("disclaimer") or DISCLAIMER)))
+    return title, "\n".join(lines)
+
+
+def _format_status(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
+    """The #status dashboard body.
+
+    Deliberately thin: :func:`app.notifications.dashboard.build_fields` already
+    decided what to show and how to word it, and the embed renders those fields
+    directly. Reformatting them here would give two answers to "what does the
+    dashboard say", and the plaintext fallback would drift from the embed.
+    """
+    title = str(payload.get("title") or f"{EMOJI[EventType.OPERATIONAL_STATUS]} TRADABOT STATUS")
+    fields = payload.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return title, "No status available."
+    return title, "\n".join(f"{name}: {value}" for name, value in fields.items())
+
+
 def _format_generic(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
     """Fallback for a type with no dedicated formatter."""
     emoji = EMOJI.get(event.type, "📄")
@@ -434,6 +487,8 @@ _FORMATTERS: dict[EventType, Any] = {
     EventType.MARKET_SIGNAL_STRENGTHENED: _format_signal,
     EventType.MARKET_SIGNAL_INVALIDATED: _format_signal,
     EventType.MARKET_OVERVIEW: _format_overview,
+    EventType.MARKET_TRENDS: _format_trends,
+    EventType.OPERATIONAL_STATUS: _format_status,
     EventType.PAPER_TRADE_OPENED: _format_trade_opened,
     EventType.PAPER_TRADE_CLOSED: _format_trade_closed,
     EventType.PAPER_TRADE_SKIPPED: _format_trade_skipped,

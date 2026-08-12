@@ -10,11 +10,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import utc_now
 from app.db.models import NotificationAttempt, NotificationState
+from app.notifications.dashboard import (
+    DASHBOARD_FINGERPRINT_KEY,
+    DASHBOARD_KEY,
+    DASHBOARD_SCOPE,
+    DashboardState,
+)
 from app.notifications.models import DeliveryResult, NotificationMessage
 from app.notifications.policy import HealthState, SignalPhase, SignalState
+from app.notifications.trends import TrendState
 
 SCOPE_SIGNAL = "signal"
 SCOPE_HEALTH = "health"
+SCOPE_TREND = "trend"
+
+TREND_PHASE = "announced"
+"""Trend state has no phases -- the column is required, so it carries a constant.
+
+Adding a nullable variant of an existing column for one new scope would be a
+migration in exchange for nothing: the useful fields here are `notified_at` and
+`score`, both of which already mean what this needs them to mean.
+"""
 
 STATUS_DELIVERED = "delivered"
 STATUS_FAILED = "failed"
@@ -151,6 +167,73 @@ class NotificationRepository:
         if row.phase != phase:
             row.changed_at = state.since or now
         row.phase = phase
+        row.updated_at = now
+        await self._session.flush()
+
+    # -- Trend state (Phase 5.8.2) -----------------------------------------
+
+    async def trend_state(self, key: str) -> TrendState:
+        """What was last announced about one symbol+event.
+
+        Maps onto the existing columns without inventing any: ``notified_at``
+        drives the cooldown and ``score`` holds the value that was announced, so
+        a move extending from 3% to 6% can be told apart from the same 3% move
+        still being true an hour later.
+        """
+        row = await self._row(SCOPE_TREND, key)
+        if row is None:
+            return TrendState(key=key)
+        return TrendState(key=key, last_notified_at=row.notified_at, last_value=row.score)
+
+    async def save_trend_state(self, key: str, *, value: float, notified_at: datetime) -> None:
+        row = await self._row(SCOPE_TREND, key)
+        now = utc_now()
+        if row is None:
+            row = NotificationState(
+                scope=SCOPE_TREND, key=key, phase=TREND_PHASE, changed_at=now, updated_at=now
+            )
+            self._session.add(row)
+        row.phase = TREND_PHASE
+        row.score = value
+        row.notified_at = notified_at
+        row.updated_at = now
+        await self._session.flush()
+
+    # -- Dashboard state (Phase 5.8.2) -------------------------------------
+
+    async def dashboard_state(self) -> DashboardState:
+        """The persistent status message's identity and last content.
+
+        **Never contains a webhook URL.** The message id alone cannot post
+        anywhere; the credential stays in the environment.
+        """
+        identity = await self._row(DASHBOARD_SCOPE, DASHBOARD_KEY)
+        content = await self._row(DASHBOARD_SCOPE, DASHBOARD_FINGERPRINT_KEY)
+        return DashboardState(
+            message_id=identity.phase if identity and identity.phase else None,
+            published_at=identity.notified_at if identity else None,
+            fingerprint=content.phase if content and content.phase else None,
+        )
+
+    async def save_dashboard_state(self, state: DashboardState) -> None:
+        await self._put(
+            DASHBOARD_SCOPE, DASHBOARD_KEY, state.message_id or "", notified_at=state.published_at
+        )
+        await self._put(DASHBOARD_SCOPE, DASHBOARD_FINGERPRINT_KEY, state.fingerprint or "")
+
+    async def _put(
+        self, scope: str, key: str, phase: str, *, notified_at: datetime | None = None
+    ) -> None:
+        row = await self._row(scope, key)
+        now = utc_now()
+        if row is None:
+            row = NotificationState(scope=scope, key=key, phase=phase, updated_at=now)
+            self._session.add(row)
+        if row.phase != phase:
+            row.changed_at = now
+        row.phase = phase
+        if notified_at is not None:
+            row.notified_at = notified_at
         row.updated_at = now
         await self._session.flush()
 

@@ -182,6 +182,24 @@ research-export: ## Write a versioned research dataset and manifest
 notify-demo: ## Send clearly-marked TEST messages to every Discord destination (manual)
 	$(BIN)/python -m app.cli notifications demo-lifecycle
 
+trends-preview: ## Show what #market-trends would say. Sends nothing.
+	$(BIN)/python -m app.cli scanner trends --preview
+
+status-preview: ## Render the #status dashboard locally. Sends nothing.
+	$(BIN)/python -m app.cli ops status-publish --preview
+
+trends: ## Publish market activity from stored scan data (what the scheduler runs)
+	$(BIN)/python -m app.cli scanner trends
+
+status-publish: ## Refresh the persistent #status message (what the scheduler runs)
+	$(BIN)/python -m app.cli ops status-publish
+
+trends-test: ## SENDS A REAL MESSAGE: one TEST post to #market-trends (manual)
+	$(BIN)/python -m app.cli scanner trends --test
+
+status-test: ## SENDS A REAL MESSAGE: force-refresh the #status dashboard (manual)
+	$(BIN)/python -m app.cli ops status-publish --test
+
 storage-plan: ## Project disk cost of an expansion (FROM=YYYY-MM-DD TO=YYYY-MM-DD)
 	$(BIN)/python -m app.cli research storage-plan --from $(FROM) --to $(TO) --universe active
 

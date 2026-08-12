@@ -44,13 +44,21 @@ def paths(tmp_path: Path) -> dict[str, Path]:
 # ---------------------------------------------------------------------------
 # Cadence
 # ---------------------------------------------------------------------------
-def test_four_jobs_at_the_documented_cadence() -> None:
+def test_six_jobs_at_the_documented_cadence() -> None:
+    """Phase 5.8.2 added trends and status, both at the scan cadence.
+
+    Neither fetches market data -- they read what sync and scan persisted -- so
+    matching the scan interval costs nothing and keeps observations from ageing
+    before they are mentioned.
+    """
     jobs = {job.name: job for job in scheduled_jobs()}
 
-    assert set(jobs) == {"sync", "scan", "overview", "summary"}
+    assert set(jobs) == {"sync", "scan", "overview", "summary", "trends", "status"}
     assert jobs["sync"].interval_seconds == 5 * 60
     assert jobs["scan"].interval_seconds == 15 * 60
     assert jobs["overview"].interval_seconds == 60 * 60
+    assert jobs["trends"].interval_seconds == 15 * 60
+    assert jobs["status"].interval_seconds == 15 * 60
 
 
 def test_the_cadence_follows_configuration() -> None:
@@ -183,13 +191,13 @@ def test_writing_templates_starts_nothing(paths: dict[str, Path]) -> None:
     )
 
     # The only artefacts are the plists themselves.
-    assert sorted(p.suffix for p in paths["agents"].iterdir()) == [".plist"] * 4
+    assert sorted(p.suffix for p in paths["agents"].iterdir()) == [".plist"] * len(scheduled_jobs())
 
 
 def test_install_commands_are_printed_not_executed(paths: dict[str, Path]) -> None:
     commands = install_commands(scheduled_jobs(), target_dir=paths["agents"])
 
-    assert len(commands) == 4
+    assert len(commands) == len(scheduled_jobs())
     assert all(command.startswith("launchctl load -w ") for command in commands)
 
 

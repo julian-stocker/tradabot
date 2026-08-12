@@ -46,6 +46,25 @@ class FeedKey(StrEnum):
     """A long thesis invalidated, or a take-profit-style exit. Never a short."""
 
 
+TRENDS_ROUTING_KEY: Final = "market-trends"
+STATUS_ROUTING_KEY: Final = "status"
+"""Dedicated destinations that must **never** fall back to another channel.
+
+Deliberately not :class:`FeedKey` members. A feed key falls back to the market
+channel when unconfigured, which is right for opportunity messages -- they belong
+in a signals channel either way. It is wrong for both of these:
+
+* descriptive trend text in #market-signals would read as a recommendation,
+  which is the one thing :mod:`app.notifications.trends` exists to prevent;
+* a status dashboard posted into a signals channel would be edited in place
+  fifteen minutes later, silently rewriting a message someone was reading.
+
+So an unconfigured webhook here means **silence**, and silence is the safe
+outcome. :meth:`DiscordWebhookNotifier.webhook_for` implements this by returning
+``None`` for any routing key that is not a feed key.
+"""
+
+
 WATCH_STATUS: Final = "NOT_IMPLEMENTED"
 """WATCH has no defensible policy yet, and inventing one would be worse than none.
 

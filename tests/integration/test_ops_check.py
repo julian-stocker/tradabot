@@ -189,7 +189,7 @@ async def test_the_check_validates_scheduler_templates(
     report = await run_checks(session, settings, project_root=Path.cwd(), log_dir=tmp_path / "logs")
 
     assert status_of(report, "scheduler") in {OK, WARN}
-    assert any("4 job templates" in r.detail for r in report.results)
+    assert any("6 job templates" in r.detail for r in report.results)
 
 
 # ---------------------------------------------------------------------------

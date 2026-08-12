@@ -253,6 +253,25 @@ class ScannerSettings(BaseModel):
     overview_interval_minutes: int = Field(
         default=60, ge=1, description="Intended gap between market overviews."
     )
+    trends_interval_minutes: int = Field(
+        default=15,
+        ge=1,
+        description=(
+            "Intended gap between #market-trends evaluations. Matched to the scan "
+            "cadence on purpose: trends read the evaluations the scanner already "
+            "persisted, so a faster cadence would re-read the same rows and a "
+            "slower one would let observations age before they are mentioned."
+        ),
+    )
+    status_interval_minutes: int = Field(
+        default=15,
+        ge=1,
+        description=(
+            "Intended gap between #status dashboard refreshes. Lives here beside "
+            "the other scheduler cadences rather than in its own settings block, "
+            "so `scheduled_jobs` reads every interval from one place."
+        ),
+    )
 
     top_candidates: int = Field(
         default=5, ge=1, le=50, description="Candidates in an overview or ranking."
