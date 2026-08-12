@@ -773,3 +773,147 @@ def _trailing_tradeability(
         return Tradeability.WATCH
 
     return Tradeability.ACTIONABLE_BUY
+
+
+# ---------------------------------------------------------------------------
+# Retest entry (phase 5.7C)
+# ---------------------------------------------------------------------------
+MIN_EPISODES_FOR_LIVE_BUY: Final = 30
+"""Historical actionable episodes required before BUY may go live.
+
+**Declared before the retest experiment was run**, so it cannot be relaxed once
+the answer is known. This is a product-safety floor, not a statistical claim: 30
+episodes proves nothing, but below it a live BUY feed would be firing on a
+pattern nobody has ever seen behave.
+
+50 would be preferable. If the reconstruction returns fewer than 30, the correct
+outcome is ``INSUFFICIENT_SAMPLE`` and BUY stays disabled.
+"""
+
+PREFERRED_EPISODES_FOR_LIVE_BUY: Final = 50
+
+RETEST_PROXIMITY_ATR: Final = 0.5
+"""How close to the broken zone counts as a retest touch.
+
+Price rarely returns exactly into the zone; requiring an exact re-entry would
+miss most real retests. Half an ATR is the same tolerance the zone width itself
+uses.
+"""
+
+
+class RetestState(StrEnum):
+    """Where a broken-resistance setup stands in its retest sequence.
+
+    The sequence exists because of a measured tension: by the time a breakout
+    confirms, price has usually travelled 525 bps (median) from validated
+    support, so the structural invalidation is too distant to size around.
+    Waiting for price to come back to the broken level puts entry next to
+    support again -- which is the whole hypothesis this phase tests.
+    """
+
+    NONE = "NONE"
+    WATCH_FOR_RETEST = "WATCH_FOR_RETEST"
+    """Breakout confirmed; price has not returned yet."""
+    RETEST_IN_PROGRESS = "RETEST_IN_PROGRESS"
+    """Price has touched the broken zone."""
+    RETEST_CONFIRMED = "RETEST_CONFIRMED"
+    """Touched and reclaimed: the level is acting as support."""
+    FAILED_RETEST = "FAILED_RETEST"
+    """Price closed decisively back below the zone. The thesis is wrong."""
+
+    @property
+    def is_entry_ready(self) -> bool:
+        return self is RetestState.RETEST_CONFIRMED
+
+
+@dataclass(frozen=True, slots=True)
+class RetestContext:
+    """The retest sequence for one broken zone, reconstructed causally."""
+
+    state: RetestState
+    zone: Zone | None = None
+    breakout_timestamp: datetime | None = None
+    retest_first_touch: datetime | None = None
+    retest_confirmation_timestamp: datetime | None = None
+
+    @property
+    def retest_zone_low(self) -> float | None:
+        return self.zone.lower_bound if self.zone else None
+
+    @property
+    def retest_zone_high(self) -> float | None:
+        return self.zone.upper_bound if self.zone else None
+
+
+def track_retest(*, zone: Zone, bars: list[Any], atr: float) -> RetestContext:
+    """Walk bars forward from a breakout and label the retest sequence.
+
+    **Strictly causal.** Each bar is examined in order and the state advances
+    only on information that bar carried; nothing looks ahead. The returned state
+    is what a trader watching live would have known at the last bar.
+
+    A retest requires three things in order: a confirmed break above the zone,
+    a return to within :data:`RETEST_PROXIMITY_ATR` of it, and a subsequent close
+    back above it. A close decisively below ends the sequence as ``FAILED_RETEST``
+    -- broken resistance that does not hold is not support.
+    """
+    tolerance = atr * RETEST_PROXIMITY_ATR
+    broke_at: datetime | None = None
+    touched_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    state = RetestState.NONE
+
+    for index, bar in enumerate(bars):
+        close = float(bar.close)
+        low = float(bar.low)
+
+        if state is RetestState.NONE:
+            # Confirmation needs two consecutive closes above: one close is an
+            # attempt, and treating it as a break would import the look-ahead
+            # `classify_break` exists to avoid.
+            if close > zone.upper_bound and index > 0:
+                previous = float(bars[index - 1].close)
+                if previous > zone.upper_bound:
+                    state = RetestState.WATCH_FOR_RETEST
+                    broke_at = bar.timestamp
+            continue
+
+        if state is RetestState.WATCH_FOR_RETEST:
+            if close < zone.lower_bound - tolerance:
+                state = RetestState.FAILED_RETEST
+            elif low <= zone.upper_bound + tolerance:
+                state = RetestState.RETEST_IN_PROGRESS
+                touched_at = bar.timestamp
+            continue
+
+        if state is RetestState.RETEST_IN_PROGRESS:
+            if close < zone.lower_bound - tolerance:
+                state = RetestState.FAILED_RETEST
+            elif close > zone.upper_bound:
+                state = RetestState.RETEST_CONFIRMED
+                confirmed_at = bar.timestamp
+            continue
+
+        if state is RetestState.RETEST_CONFIRMED and close < zone.lower_bound - tolerance:
+            state = RetestState.FAILED_RETEST
+
+    return RetestContext(
+        state=state,
+        zone=zone,
+        breakout_timestamp=broke_at,
+        retest_first_touch=touched_at,
+        retest_confirmation_timestamp=confirmed_at,
+    )
+
+
+def retest_invalidation(zone: Zone, atr: float) -> tuple[float, str]:
+    """Below the reclaimed zone, plus a volatility buffer.
+
+    Structural, not a percentage: the thesis is "this level now acts as support",
+    so the thesis is wrong exactly when price closes below it. The buffer is a
+    quarter ATR, matching the ordinary invalidation rule.
+    """
+    return (
+        round(zone.lower_bound - atr * 0.25, 4),
+        "below the reclaimed breakout zone (role-reversal support)",
+    )

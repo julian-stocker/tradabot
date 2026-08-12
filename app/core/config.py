@@ -37,6 +37,8 @@ _FEED_WEBHOOK_KEYS: dict[str, str] = {
     "watch_webhook": "watch-opportunities",
     "buy_webhook": "buy-opportunities",
     "sell_exit_webhook": "sell-exit-signals",
+    "trends_webhook": "market-trends",
+    "status_webhook": "status",
 }
 """Opportunity-feed variables to routing keys.
 
@@ -378,6 +380,20 @@ class DiscordSettings(BaseModel):
     )
     sell_exit_webhook: SecretStr = Field(
         default=SecretStr(""), description="Optional #sell-exit-signals channel."
+    )
+    trends_webhook: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Optional #market-trends channel. Descriptive market activity, never "
+            "a recommendation. Absent means trend messages are simply not sent."
+        ),
+    )
+    status_webhook: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Optional #status dashboard. Operational health only; failures still "
+            "go to the system channel."
+        ),
     )
     username: str = Field(default="tradabot", description="Display name on posted messages.")
 

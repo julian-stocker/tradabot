@@ -146,6 +146,49 @@ class DiscordWebhookNotifier:
         }
         return await self._post(url, payload, message.category, message.routing_key)
 
+    async def publish_dashboard(
+        self, message: NotificationMessage, *, message_id: str | None
+    ) -> str | None:
+        """Create or edit the persistent status message; return its id.
+
+        Editing keeps #status a dashboard rather than a log. ``?wait=true`` makes
+        Discord return the created message so its id can be stored; a PATCH to
+        ``/messages/{id}`` edits it thereafter.
+
+        Any failure to edit -- the message was deleted, the webhook rotated --
+        falls back to posting a new one and returning the new id. The worst case
+        is one extra message, never a dashboard that silently stops updating.
+        """
+        url = self.webhook_for(message.category, message.routing_key)
+        if url is None:
+            return None
+
+        payload = {
+            **build_payload(message, max_characters=self._max_characters, use_embeds=True),
+            "username": self._settings.username,
+            "allowed_mentions": {"parse": []},
+        }
+
+        if message_id:
+            try:
+                response = await self._request(f"{url}/messages/{message_id}", payload, patch=True)
+                if response.status_code < 300:  # noqa: PLR2004
+                    return message_id
+            except Exception as exc:
+                logger.info("dashboard edit failed; recreating", error=safe_message(exc))
+
+        try:
+            created = await self._request(f"{url}?wait=true", payload)
+        except Exception as exc:
+            logger.warning("dashboard publish failed", error=safe_message(exc))
+            return None
+        if created.status_code >= 300:  # noqa: PLR2004
+            return None
+        try:
+            return str(created.json().get("id")) or None
+        except Exception:
+            return None
+
     async def _post(
         self,
         url: str,
@@ -226,12 +269,15 @@ class DiscordWebhookNotifier:
                 return min(retry_after, self._settings.backoff_max_seconds)
         return random.uniform(0, min(delay, self._settings.backoff_max_seconds))
 
-    async def _request(self, url: str, payload: Mapping[str, Any]) -> httpx.Response:
+    async def _request(
+        self, url: str, payload: Mapping[str, Any], *, patch: bool = False
+    ) -> httpx.Response:
         timeout = self._settings.request_timeout_seconds
+        method = "PATCH" if patch else "POST"
         if self._client is not None:
-            return await self._client.post(url, json=payload, timeout=timeout)
+            return await self._client.request(method, url, json=payload, timeout=timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            return await client.post(url, json=payload)
+            return await client.request(method, url, json=payload)
 
 
 def _retry_after(response: httpx.Response) -> float | None:

@@ -244,7 +244,8 @@
       "Bash(.venv/bin/mypy app/scanner/plans.py --strict)",
       "Bash(.venv/bin/mypy app/core/config.py --strict)",
       "Bash(awk '{print \"  .env last modified:\", $6, $7, $8}')",
-      "Bash(sqlite3 tradabot.db \"SELECT COUNT\\(*\\) FROM sqlite_master WHERE type='table';\")"
+      "Bash(sqlite3 tradabot.db \"SELECT COUNT\\(*\\) FROM sqlite_master WHERE type='table';\")",
+      "Bash(.venv/bin/mypy app/notifications/trends.py --strict)"
     ]
   }
 }
