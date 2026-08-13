@@ -457,6 +457,17 @@ def _format_trends(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
         lines.append(line)
 
     lines.extend(("", str(payload.get("disclaimer") or DISCLAIMER)))
+
+    volatility = payload.get("volatility")
+    if isinstance(volatility, dict):
+        # Appended as its own block rather than merged into the movers list: the
+        # two make different claims, and a reader must be able to tell "this
+        # moved" from "this is expected to move".
+        lines.append("")
+        lines.append(str(volatility.get("title") or "EXPECTED MOVEMENT"))
+        lines.extend(str(line) for line in volatility.get("lines", []))
+        lines.append(str(volatility.get("disclaimer") or ""))
+
     return title, "\n".join(lines)
 
 

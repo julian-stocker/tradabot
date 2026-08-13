@@ -19,6 +19,7 @@ from app.notifications.dashboard import (
 from app.notifications.models import DeliveryResult, NotificationMessage
 from app.notifications.policy import HealthState, SignalPhase, SignalState
 from app.notifications.trends import TrendState
+from app.notifications.volatility_events import VOLATILITY_SCOPE
 
 SCOPE_SIGNAL = "signal"
 SCOPE_HEALTH = "health"
@@ -198,6 +199,29 @@ class NotificationRepository:
         row.notified_at = notified_at
         row.updated_at = now
         await self._session.flush()
+
+    # -- Volatility regime state (Phase 8.2) -------------------------------
+
+    async def volatility_regimes(self) -> dict[str, str]:
+        """Last announced regime per symbol.
+
+        One query rather than one per symbol: the trends job needs all 52 on
+        every cycle, and 52 round trips would be the slowest part of a job whose
+        whole point is that it reads cheaply.
+        """
+        stmt = select(NotificationState).where(NotificationState.scope == VOLATILITY_SCOPE)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.key.removeprefix("vol:"): row.phase for row in rows}
+
+    async def save_volatility_regimes(self, regimes: dict[str, str]) -> None:
+        """Persist this cycle's regimes.
+
+        Symbols absent from ``regimes`` keep their stored value untouched -- a
+        stale estimate must not rewrite state and manufacture a transition when
+        the feed recovers.
+        """
+        for symbol, regime in regimes.items():
+            await self._put(VOLATILITY_SCOPE, f"vol:{symbol}", regime)
 
     # -- Dashboard state (Phase 5.8.2) -------------------------------------
 

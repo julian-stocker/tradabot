@@ -38,10 +38,13 @@ from app.domain.enums import Timeframe
 from app.instruments.repository import InstrumentRepository
 from app.market_data.calendars import get_trading_calendar
 from app.market_data.repository import CandleRepository
+from app.market_data.volatility import VolatilityRegime
+from app.market_data.volatility_service import VolatilityService
 from app.notifications.feeds import TRENDS_ROUTING_KEY
 from app.notifications.repository import NotificationRepository
 from app.notifications.service import NotificationService
 from app.notifications.trends import (
+    TrendEvent,
     TrendSignal,
     assert_no_recommendation_language,
     build_payload,
@@ -50,7 +53,13 @@ from app.notifications.trends import (
     session_allows_trends,
     should_notify,
 )
-from app.scanner.repository import SignalEvaluationRepository
+from app.notifications.volatility_events import (
+    VolatilityEvent,
+    build_section,
+    detect_events,
+    next_state,
+)
+from app.scanner.repository import SignalEvaluationRepository, WatchlistRepository
 from app.scanner.sessions import session_phase
 
 logger = get_logger(__name__)
@@ -87,6 +96,9 @@ class TrendsRun:
     events_published: int = 0
     messages_sent: int = 0
     signals: list[TrendSignal] = field(default_factory=list)
+    volatility_events: list[VolatilityEvent] = field(default_factory=list)
+    volatility_elevated: int = 0
+    volatility_evaluated: int = 0
 
     def summary(self) -> str:
         if self.skipped_reason:
@@ -94,6 +106,8 @@ class TrendsRun:
         return (
             f"{self.symbols_considered} symbols, {self.events_detected} notable, "
             f"{self.events_suppressed} suppressed, {self.events_published} published, "
+            f"{len(self.volatility_events)} volatility transition(s) "
+            f"({self.volatility_elevated} elevated), "
             f"{self.messages_sent} message(s) sent"
         )
 
@@ -129,6 +143,17 @@ class TrendsService:
 
         async with session_scope(self._factory) as session:
             signals, considered, freshness = await self._observe(session, now=moment)
+            volatility, elevated, evaluated = await self._observe_volatility(session, now=moment)
+
+        # A symbol whose regime changed is already reported in the volatility
+        # section; its generic volatility-expansion trend signal would be a
+        # second line about the same state in the same post.
+        announced = {event.symbol for event in volatility}
+        signals = [
+            signal
+            for signal in signals
+            if not (signal.event is TrendEvent.VOLATILITY_EXPANSION and signal.symbol in announced)
+        ]
 
         if freshness is not None:
             return TrendsRun(
@@ -144,6 +169,9 @@ class TrendsService:
             symbols_considered=considered,
             events_detected=len(signals),
             signals=signals,
+            volatility_events=volatility,
+            volatility_elevated=elevated,
+            volatility_evaluated=evaluated,
         )
 
     async def publish(self, *, now: datetime | None = None) -> TrendsRun:
@@ -155,14 +183,14 @@ class TrendsService:
         """
         moment = now or utc_now()
         run = await self.evaluate(now=moment)
-        if run.skipped_reason or not run.signals:
+        if run.skipped_reason or not (run.signals or run.volatility_events):
             logger.info("trends evaluated", session=run.session, outcome=run.summary())
             return run
 
         fresh = await self._filter_by_cooldown(run.signals, now=moment)
         suppressed = len(run.signals) - len(fresh)
 
-        if not fresh:
+        if not fresh and not run.volatility_events:
             # Silence is the expected state. No "nothing found" message: a channel
             # that speaks when there is nothing to say trains its reader to skim.
             logger.info(
@@ -179,6 +207,9 @@ class TrendsService:
 
         if sent:
             await self._remember(top, now=moment)
+            # Regime state advances only on delivery, matching the cooldown rule:
+            # a transition nobody saw must still be announceable next cycle.
+            await self._remember_volatility(run, now=moment)
 
         result = replace(
             run,
@@ -232,6 +263,31 @@ class TrendsService:
             )
         return found, len(evaluations), None
 
+    async def _observe_volatility(
+        self, session: AsyncSession, *, now: datetime
+    ) -> tuple[list[VolatilityEvent], int, int]:
+        """Regime transitions since the last cycle.
+
+        Reads stored candles through the same engine the CLI and the status
+        dashboard use, so a volatility alert and the `Volatility` status line can
+        never disagree about what the regime is.
+        """
+        symbols = await WatchlistRepository(session).symbols()
+        snapshot = await VolatilityService(session).for_symbols(symbols, now=now)
+        previous_raw = await NotificationRepository(session).volatility_regimes()
+        previous = {symbol: _regime_or_none(value) for symbol, value in previous_raw.items()}
+        events = detect_events(snapshot.estimates, previous, now=now)
+        return events, len(snapshot.elevated), len(snapshot.estimates)
+
+    async def _remember_volatility(self, run: TrendsRun, *, now: datetime) -> None:
+        if not run.volatility_events:
+            return
+        estimates = [event.movement for event in run.volatility_events]
+        async with session_scope(self._factory) as session:
+            await NotificationRepository(session).save_volatility_regimes(
+                next_state(estimates, now=now)
+            )
+
     async def _filter_by_cooldown(
         self, signals: list[TrendSignal], *, now: datetime
     ) -> list[TrendSignal]:
@@ -262,6 +318,12 @@ class TrendsService:
         payload = build_payload(
             signals, context={"session": run.session, "symbols": run.symbols_considered}
         )
+        if run.volatility_events:
+            # **One post, two sections.** Two messages per cycle would double the
+            # notification count for a channel whose whole design is restraint.
+            payload["volatility"] = build_section(
+                run.volatility_events, elevated_total=run.volatility_elevated
+            )
         # Checked before it leaves, on the rendered text rather than the template:
         # the guarantee is about what lands in Discord, not about what a formatter
         # intended.
@@ -328,3 +390,11 @@ def _state(metrics: dict[str, Any] | None) -> str | None:
 def _hours(delta: timedelta) -> str:
     hours = delta.total_seconds() / 3600
     return f"{hours:.0f}h" if hours >= 1 else f"{delta.total_seconds() / 60:.0f}m"
+
+
+def _regime_or_none(value: str) -> VolatilityRegime | None:
+    """Stored regime string to enum, tolerating a value written by an older model."""
+    try:
+        return VolatilityRegime(value)
+    except ValueError:
+        return None

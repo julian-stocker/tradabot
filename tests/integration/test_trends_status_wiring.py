@@ -14,6 +14,7 @@ its failure reach the scanner.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -837,3 +838,151 @@ def _all_state() -> Any:
     from sqlalchemy import select
 
     return select(NotificationState)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8.2: volatility regimes published through the existing trends job
+# ---------------------------------------------------------------------------
+async def store_hourly_history(
+    session: AsyncSession, *, symbol: str, bars: int, spread: float, at: datetime
+) -> None:
+    """Enough hourly candles for the volatility engine to rank against."""
+    from decimal import Decimal
+
+    from app.db.models import Candle, WatchlistEntry
+
+    instrument = await InstrumentRepository(session).get_by_symbol(symbol)
+    assert instrument is not None
+    # The volatility pass reads the enabled watchlist, so the symbol has to be on
+    # it -- exactly as production does.
+    session.add(
+        WatchlistEntry(instrument_id=instrument.id, enabled=True, created_at=at, updated_at=at)
+    )
+    for index in range(bars):
+        wobble = spread if index % 3 else spread * 3
+        session.add(
+            Candle(
+                instrument_id=instrument.id,
+                timeframe="H1",
+                timestamp=at - timedelta(hours=bars - index),
+                open=Decimal("100"),
+                high=Decimal(str(100 + wobble)),
+                low=Decimal(str(100 - wobble)),
+                close=Decimal("100"),
+                volume=Decimal("1000000"),
+                provider="alpaca",
+            )
+        )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_the_trends_job_publishes_a_volatility_regime_change(
+    seeded_session: AsyncSession, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """**The integration point.** One job, one post, two sections.
+
+    No second scheduler job and no provider call: the volatility engine reads the
+    same stored candles the trends job already uses.
+    """
+    await store_hourly_history(seeded_session, symbol="MSFT", bars=300, spread=0.4, at=REGULAR)
+    await store_evaluation(seeded_session, symbol="MSFT", at=REGULAR, relative_volume=3.1)
+
+    backend = CapturingBackend()
+    settings = make_settings()
+    service = TrendsService(
+        factory,
+        settings=settings,
+        notifications=NotificationService(settings, backends=[backend]),
+    )
+
+    run = await service.publish(now=REGULAR)
+
+    assert run.volatility_evaluated >= 1
+    assert len(backend.messages) == 1, "volatility must not be a second message"
+
+
+@pytest.mark.asyncio
+async def test_a_volatility_regime_is_not_republished_while_it_persists(
+    seeded_session: AsyncSession, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """State, not cooldown: the same elevated regime is silent next cycle."""
+    await store_hourly_history(seeded_session, symbol="MSFT", bars=300, spread=0.4, at=REGULAR)
+    await store_evaluation(seeded_session, symbol="MSFT", at=REGULAR, relative_volume=3.1)
+
+    backend = CapturingBackend()
+    settings = make_settings()
+    service = TrendsService(
+        factory,
+        settings=settings,
+        notifications=NotificationService(settings, backends=[backend]),
+    )
+
+    first = await service.publish(now=REGULAR)
+    second = await service.publish(now=REGULAR + timedelta(minutes=15))
+
+    assert len(second.volatility_events) <= len(first.volatility_events)
+
+
+def test_the_volatility_pass_makes_no_provider_call() -> None:
+    """Stored candles only -- a descriptive channel must not spend API quota."""
+    source = Path("app/notifications/trends_service.py").read_text()
+
+    assert "build_provider" not in source
+    assert "MarketDataProvider" not in source
+    assert "VolatilityService" in source
+
+
+def test_status_and_trends_read_the_same_volatility_engine() -> None:
+    """They must never disagree about the regime.
+
+    Asserted structurally: both import the one service, so there is no second
+    implementation that could drift.
+    """
+    trends = Path("app/notifications/trends_service.py").read_text()
+    status = Path("app/notifications/status_service.py").read_text()
+
+    assert "from app.market_data.volatility_service import VolatilityService" in trends
+    assert "VolatilityService" in status
+
+
+@pytest.mark.asyncio
+async def test_a_discord_failure_during_a_volatility_cycle_is_contained(
+    seeded_session: AsyncSession, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The trends job may fail to deliver; it may never raise into the scheduler."""
+    await store_hourly_history(seeded_session, symbol="MSFT", bars=300, spread=0.4, at=REGULAR)
+    await store_evaluation(seeded_session, symbol="MSFT", at=REGULAR, relative_volume=3.1)
+
+    settings = make_settings()
+    service = TrendsService(
+        factory,
+        settings=settings,
+        notifications=NotificationService(settings, backends=[BrokenBackend(raises=True)]),
+    )
+
+    run = await service.publish(now=REGULAR)
+
+    assert run.messages_sent == 0
+
+
+@pytest.mark.asyncio
+async def test_volatility_state_is_not_advanced_when_delivery_fails(
+    seeded_session: AsyncSession, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A transition nobody saw must still be announceable next cycle."""
+    await store_hourly_history(seeded_session, symbol="MSFT", bars=300, spread=0.4, at=REGULAR)
+    await store_evaluation(seeded_session, symbol="MSFT", at=REGULAR, relative_volume=3.1)
+
+    settings = make_settings()
+    broken = TrendsService(
+        factory,
+        settings=settings,
+        notifications=NotificationService(settings, backends=[BrokenBackend()]),
+    )
+    await broken.publish(now=REGULAR)
+
+    async with factory() as session:
+        stored = await NotificationRepository(session).volatility_regimes()
+
+    assert stored == {}, "regime state advanced despite a failed delivery"

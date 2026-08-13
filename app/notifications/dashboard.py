@@ -226,6 +226,7 @@ def build_fields(
     candles: int | None = None,
     discord_destinations: int = 0,
     jobs: tuple[str, ...] = (),
+    volatility: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, str]:
     """The dashboard grid.
@@ -256,6 +257,11 @@ def build_fields(
     fields["Evaluations"] = (
         f"{status.evaluations_stored:,}" if status.evaluations_stored else NOT_AVAILABLE
     )
+
+    if volatility:
+        # One line, deliberately. #status answers "is it working?"; turning it
+        # into a market dashboard would bury the health signal it exists for.
+        fields["Volatility"] = volatility
 
     if jobs:
         # Named rather than counted: "6 jobs" does not tell an operator that the

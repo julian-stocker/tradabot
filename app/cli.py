@@ -34,6 +34,10 @@ from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
+from app.market_data.volatility import MODEL_VERSION, VolatilityRegime
+from app.market_data.volatility_service import DISCLAIMER as VOLATILITY_DISCLAIMER
+from app.market_data.volatility_service import VolatilityService
+from app.market_data.volatility_service import build_payload as build_volatility_payload
 from app.notifications.backends.discord import DiscordWebhookNotifier
 from app.notifications.dashboard import LIVENESS_NOTE
 from app.notifications.demo import lifecycle_events
@@ -46,6 +50,7 @@ from app.notifications.summary import build_daily_summary, daily_summary_already
 from app.notifications.trends import DISCLAIMER, TrendEvent, TrendSignal, rank
 from app.notifications.trends import build_payload as build_trends_payload
 from app.notifications.trends_service import TrendsService
+from app.notifications.volatility_events import build_section as build_volatility_section
 from app.ops.check import operational_status, run_checks
 from app.ops.launchd import (
     LAUNCH_AGENTS_DIR,
@@ -865,14 +870,23 @@ async def _scanner_trends(settings: Settings, *, preview: bool, test: bool) -> i
                 return 0
             print(f"symbols    : {run.symbols_considered} considered")
             print(f"notable    : {run.events_detected} event(s)")
-            if not run.signals:
+            print(
+                f"volatility : {run.volatility_evaluated} evaluated, "
+                f"{run.volatility_elevated} elevated, "
+                f"{len(run.volatility_events)} regime transition(s)"
+            )
+            if not run.signals and not run.volatility_events:
                 print("\nNothing notable. No message would be sent -- that is the healthy state.")
+                return 0
+            if not run.signals:
+                _print_volatility_preview(run)
                 return 0
             print("\nWould send:")
             for index, signal in enumerate(rank(run.signals), start=1):
                 detail = f"   ({signal.detail})" if signal.detail else ""
                 print(f"  {index}. {signal.symbol:<6} {signal.headline}{detail}")
             print(f"\n{DISCLAIMER}")
+            _print_volatility_preview(run)
             print("\n(Cooldown is not applied in a preview; a live run may send fewer.)")
             return 0
 
@@ -881,6 +895,20 @@ async def _scanner_trends(settings: Settings, *, preview: bool, test: bool) -> i
         return 0
     finally:
         await engine.dispose()
+
+
+def _print_volatility_preview(run: object) -> None:
+    """The volatility section of the preview, if this cycle has one."""
+    events = getattr(run, "volatility_events", [])
+    if not events:
+        return
+    section = build_volatility_section(
+        events, elevated_total=getattr(run, "volatility_elevated", 0)
+    )
+    print(f"\n{section['title']}")
+    for line in section["lines"]:
+        print("  " + str(line).replace("\n", "\n  "))
+    print(f"\n{section['disclaimer']}")
 
 
 async def _trends_test(settings: Settings, factory: object) -> int:
@@ -914,6 +942,20 @@ async def _trends_test(settings: Settings, factory: object) -> int:
         context={"test": True},
     )
     payload["title"] = "🧪 TEST — MARKET ACTIVITY"
+    # Exercises the volatility rendering path with constructed symbols. Writes no
+    # regime state, so a test cannot silence a real transition.
+    payload["volatility"] = {
+        "title": "📊 TEST — EXPECTED MOVEMENT",
+        "lines": [
+            "**TEST-C** — EXTREME expected movement\n   "
+            "94th pct · typical session ~2.7% · stress ~5.8%",
+            "**TEST-D** — HIGH expected movement\n   "
+            "78th pct · typical session ~2.3% · stress ~4.8%",
+            "+ 2 more symbol(s) changed volatility state",
+        ],
+        "disclaimer": VOLATILITY_DISCLAIMER,
+        "model": MODEL_VERSION,
+    }
     delivered = await service.publish(
         Event(
             type=EventType.MARKET_TRENDS,
@@ -962,6 +1004,67 @@ async def _ops_status_publish(settings: Settings, *, preview: bool, test: bool) 
             return 1
         verb = "created" if run.created else "updated" if run.published else "unchanged"
         print(f"\nstatus dashboard {verb} ({run.reason})")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _volatility(settings: Settings, *, symbol: str | None, preview: bool) -> int:
+    """Expected movement per symbol. **Read-only, magnitude only.**
+
+    Makes no provider call: every input is a stored candle, exactly as the
+    scheduled trends job does. Prints no direction, target or price, because
+    phases 6-8 found no evidence supporting any of them.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            symbols = [symbol.upper()] if symbol else await WatchlistRepository(session).symbols()
+            snapshot = await VolatilityService(session).for_symbols(symbols)
+
+        if not snapshot.estimates:
+            print(f"\nno estimate available for {', '.join(symbols)}")
+            print("(a symbol needs enough stored hourly history to rank against)")
+            return 1
+
+        if preview:
+            payload = build_volatility_payload(snapshot)
+            print("\n--- PREVIEW: nothing was sent to Discord ---")
+            print(f"  {payload['title']}")
+            if not payload["lines"]:
+                print("\n  No symbol is in an elevated volatility regime right now.")
+                print("  Silence is the healthy state -- see docs/volatility.md.")
+            for line in payload["lines"]:
+                print("  " + line.replace("\n", "\n  "))
+            print(f"\n  {payload['disclaimer']}")
+            print(f"  model={payload['model']}  evaluated={payload['evaluated']}")
+            return 0
+
+        counts = snapshot.by_regime
+        print(f"\nmodel      : {MODEL_VERSION}")
+        print(f"evaluated  : {len(snapshot.estimates)}/{snapshot.symbols_requested}")
+        print(
+            "regimes    : "
+            + "  ".join(f"{regime.value}={counts[regime]}" for regime in VolatilityRegime)
+        )
+        stale = snapshot.stale()
+        if stale:
+            print(f"stale      : {len(stale)} symbol(s) beyond the freshness window")
+        print()
+        header = f"  {'SYMBOL':<8}{'REGIME':<14}{'PCT':>5}{'TYPICAL':>9}{'STRESS':>8}"
+        print(header + f"{'RECENT':>8}{'ATR%':>7}{'AGE':>7}")
+        print("  " + "-" * (len(header) + 22))
+        for item in sorted(snapshot.estimates, key=lambda e: e.percentile, reverse=True):
+            age = int(item.data_age().total_seconds() // 60)
+            flag = " stale" if item.is_stale() else ""
+            print(
+                f"  {item.symbol:<8}{item.regime.value:<14}"
+                f"{item.percentile * 100:>4.0f}%{item.typical_range_pct:>8.1f}%"
+                f"{item.stress_range_pct:>7.1f}%{item.recent_range_pct:>7.1f}%"
+                f"{item.atr_pct:>6.2f}%{age:>6}m{flag}"
+            )
+        print(f"\n{VOLATILITY_DISCLAIMER}")
         return 0
     finally:
         await engine.dispose()
@@ -1438,6 +1541,9 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
             Horizon(args.horizon),
         )
     ),
+    "volatility": lambda settings, args: asyncio.run(
+        _volatility(settings, symbol=args.symbol, preview=args.preview)
+    ),
     "market-data": _run_market_data,
     "notifications": _run_notifications,
     "watchlist": _run_watchlist,
@@ -1686,6 +1792,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--category", choices=[c.value for c in EventCategory], help="Limit to one channel"
     )
     notify_sub.add_parser("daily-summary", help="Build and send the daily portfolio report")
+
+    volatility = sub.add_parser(
+        "volatility", help="Expected movement per symbol (magnitude only, read-only)"
+    )
+    volatility.add_argument("symbol", nargs="?", help="One ticker; omit for the whole watchlist")
+    volatility.add_argument(
+        "--preview", action="store_true", help="Render the Discord view and send nothing"
+    )
 
     market = sub.add_parser("market-data", help="Market-data provider operations")
     market_sub = market.add_subparsers(dest="market_command", required=True)

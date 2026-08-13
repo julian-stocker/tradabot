@@ -28,6 +28,9 @@ from app.core.redaction import safe_message
 from app.core.time import utc_now
 from app.db.models import Candle
 from app.db.session import session_scope
+from app.market_data.volatility import MODEL_VERSION as VOLATILITY_MODEL
+from app.market_data.volatility import VolatilityRegime
+from app.market_data.volatility_service import VolatilityService
 from app.notifications.backends.discord import DiscordWebhookNotifier
 from app.notifications.dashboard import (
     LIVENESS_NOTE,
@@ -42,6 +45,7 @@ from app.notifications.formatters import format_event
 from app.notifications.repository import NotificationRepository
 from app.ops.check import operational_status
 from app.ops.launchd import ScheduledJob, scheduled_jobs
+from app.scanner.repository import WatchlistRepository
 
 logger = get_logger(__name__)
 
@@ -85,6 +89,7 @@ class StatusService:
         async with session_scope(self._factory) as session:
             status = await operational_status(session, self._settings, now=moment)
             revision, candles = await _database_facts(session)
+            volatility = await _volatility_health(session, now=moment)
 
         return build_fields(
             status,
@@ -96,6 +101,7 @@ class StatusService:
             candles=candles,
             discord_destinations=len(self._settings.discord.configured_categories),
             jobs=tuple(job.name for job in _jobs(self._settings)),
+            volatility=volatility,
             now=moment,
         )
 
@@ -184,6 +190,34 @@ class StatusService:
         # Losing the id costs one duplicate message next tick, not a broken run.
         except Exception as exc:
             logger.warning("could not persist dashboard state", error=safe_message(exc))
+
+
+async def _volatility_health(session: AsyncSession, *, now: datetime) -> str | None:
+    """One line describing the volatility engine's health, not the market.
+
+    Reports coverage and how many symbols are elevated -- enough to see the
+    engine ran and to notice a feed problem, without turning the health channel
+    into a market feed. Never raises: a status dashboard that failed because a
+    derived metric failed would be reporting on itself.
+    """
+    try:
+        symbols = await WatchlistRepository(session).symbols()
+        snapshot = await VolatilityService(session).for_symbols(symbols, now=now)
+    except Exception as exc:
+        logger.debug("volatility health unavailable", error=safe_message(exc))
+        return None
+
+    if not snapshot.estimates:
+        return f"{VOLATILITY_MODEL} · no estimate"
+
+    counts = snapshot.by_regime
+    elevated = counts[VolatilityRegime.HIGH] + counts[VolatilityRegime.EXTREME]
+    stale = len(snapshot.stale(now=now))
+    detail = (
+        f"{VOLATILITY_MODEL} · {len(snapshot.estimates)}/{snapshot.symbols_requested} "
+        f"· {elevated} elevated"
+    )
+    return detail + (f" · {stale} stale" if stale else "")
 
 
 async def _database_facts(session: AsyncSession) -> tuple[str, int | None]:

@@ -302,7 +302,16 @@
       "Bash(.venv/bin/mypy app/research/phase6.py --strict)",
       "Bash(cp /tmp/run_univariate.py ./run_univariate_tmp.py)",
       "Bash(.venv/bin/python run_univariate_tmp.py)",
-      "Bash(pkill -f run_univariate_tmp.py)"
+      "Bash(pkill -f run_univariate_tmp.py)",
+      "Bash(sed -n '/PART C  MARKET x SECTOR REGIME  \\(COARSE_HISTORICAL 5d\\)/,+6p' /tmp/phase7.txt)",
+      "Bash(sed -n '/PART I  TREND vs RANGE REGIME  \\(COARSE_HISTORICAL 5d\\)/,+5p' /tmp/phase7.txt)",
+      "Bash(sed -n '/PART G/,$p' /tmp/phase7.txt)",
+      "Bash(awk '{printf \"DB: %.2f GB\\\\n\",$5/1073741824}')",
+      "Bash(awk 'NR==2{print \"free:\",$4}')",
+      "Bash(sqlite3 -cmd '.timeout 60000' tradabot.db 'SELECT count\\(*\\) FROM signal_outcomes;')",
+      "Bash(echo \"outcomes: $\\(sqlite3 -cmd '.timeout 60000' tradabot.db 'SELECT count\\(*\\) FROM signal_outcomes;'\\)\")",
+      "Bash(sqlite3 -cmd \".timeout 60000\" tradabot.db \"SELECT volatility_metrics FROM signal_evaluations WHERE backtest_run_id IS NULL ORDER BY id DESC LIMIT 1;\")",
+      "Bash(sqlite3 -cmd \".timeout 60000\" tradabot.db \"SELECT count\\(*\\)/52 AS avg_h1_bars_per_symbol FROM candles WHERE timeframe='H1';\")"
     ]
   }
 }
