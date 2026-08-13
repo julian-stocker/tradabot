@@ -17,6 +17,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -99,6 +100,17 @@ class Observation:
     mfe: float | None
     mae: float | None
     features: dict[str, float | None]
+
+    timestamp: datetime | None = None
+    """When the observation was made. Needed to order folds and episodes.
+
+    Defaulted so existing callers that only group by band or year are
+    unaffected; the walk-forward protocol requires it and raises on its absence
+    rather than silently building folds from unordered rows.
+    """
+    direction: int = 0
+    """Signal direction. Part of episode identity -- a reversal is a different
+    opportunity even when symbol and timing are continuous."""
 
 
 def summarise(rows: Sequence[Observation], *, label: str) -> GroupStats:
@@ -243,6 +255,8 @@ async def load_observations(
             score=evaluation.score,
             horizon=outcome.horizon,
             year=outcome.reference_timestamp.year,
+            timestamp=outcome.reference_timestamp,
+            direction=evaluation.direction,
             raw_return=outcome.raw_return,
             mfe=outcome.mfe,
             mae=outcome.mae,

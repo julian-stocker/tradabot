@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backtesting.engine import BacktestConfig
+from app.backtesting.modes import ReplayMode
 from app.backtesting.runner import PortfolioResult, run_backtest
 from app.core.config import Settings
 from app.db.session import create_engine, create_session_factory, session_scope
@@ -38,6 +39,19 @@ from app.research.export import build_dataset, write_dataset
 from app.research.repository import BacktestRunRepository, OutcomeRepository
 from app.research.service import OutcomeLabellingService
 from app.research.storage import build_plan, human_bytes
+from app.research.walkforward import (
+    BASELINE,
+    SCORE_GE_75,
+    SCORE_GE_85,
+    THRESHOLD_75,
+    THRESHOLD_85,
+    assess_stability,
+    bootstrap_difference,
+    bootstrap_positive_rate,
+    build_folds,
+    episodes_for,
+    evaluate_fold,
+)
 from app.scanner.repository import WatchlistRepository
 
 DEFAULT_EXPORT_DIR = Path("exports")
@@ -526,3 +540,267 @@ async def historical_backfill(
         return 0 if report.ok else 1
     finally:
         await engine.dispose()
+
+
+async def research_walkforward(
+    settings: Settings,
+    *,
+    run_id: int | None = None,
+    folds: int = 8,
+    horizons: tuple[str, ...] = ("1d", "5d"),
+) -> int:
+    """Chronological out-of-sample validation of the frozen scoring rule.
+
+    Reports each fold separately and never averages a thin one into a headline.
+    The grouping variable is the **score band**, not the production ``qualified``
+    flag -- see :mod:`app.research.walkforward` for why that distinction is
+    load-bearing rather than pedantic.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            run = await BacktestRunRepository(session).get(run_id) if run_id else None
+            if run_id is not None and run is None:
+                print(f"no backtest run {run_id}")
+                return 1
+
+            mode = run.replay_mode if run else "LIVE+ALL"
+            available = run.available_timeframes if run else "-"
+            print(f"\nWALK-FORWARD VALIDATION   run={run_id or 'all'}  mode={mode}")
+            print(f"timeframes available: {available}")
+            print(
+                "grouping: SCORE BANDS (score >= 75 / >= 85). NOT the production `qualified` flag."
+            )
+            if run is not None and run.replay_mode == ReplayMode.COARSE_HISTORICAL.value:
+                print(
+                    "NOTE: in this window `qualified` and `aligned` are structurally "
+                    "false (5m/15m absent), so neither is used or reported."
+                )
+
+            for horizon_name in horizons:
+                await _walkforward_horizon(
+                    session, run=run, horizon_name=horizon_name, fold_count=folds
+                )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _walkforward_horizon(
+    session: Any, *, run: Any, horizon_name: str, fold_count: int
+) -> None:
+    rows = await load_observations(
+        session,
+        horizon=Horizon(horizon_name),
+        backtest_run_id=run.id if run else None,
+        complete_only=True,
+    )
+    dated = [row for row in rows if row.timestamp is not None]
+    print(
+        f"\n{'=' * 78}\nHORIZON {horizon_name}   observations with complete labels: {len(dated):,}"
+    )
+    if not dated:
+        print("  (none)")
+        return
+
+    start = min(row.timestamp for row in dated if row.timestamp)
+    end = max(row.timestamp for row in dated if row.timestamp)
+
+    count = fold_count
+    while count > 1:
+        try:
+            folds = build_folds(start=start, end=end, count=count, horizon=horizon_name)
+            break
+        # Fewer folds rather than folds shorter than their own outcome window.
+        except ValueError:
+            count -= 1
+    else:
+        print("  window too short for any fold")
+        return
+    if count != fold_count:
+        print(f"  using {count} folds; {fold_count} would be shorter than the outcome window")
+
+    results = [evaluate_fold(dated, fold, horizon=horizon_name) for fold in folds]
+
+    header = (
+        f"  {'FOLD':<22}{'BAND':<16}{'obs':>8}{'eps':>6}{'pos%':>8}{'mean%':>9}{'MFE':>8}{'MAE':>8}"
+    )
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for result in results:
+        for band in (BASELINE, SCORE_GE_75, SCORE_GE_85):
+            entry = result.bands.get(band)
+            if entry is None:
+                continue
+            stats = entry.episodes
+            flag = "  <- thin" if entry.is_thin else ""
+            print(
+                f"  {result.fold.label:<18}{band:<16}"
+                f"{entry.observations.n:>8}{entry.episode_count:>6}"
+                f"{_rate(stats.positive_rate):>8}{_pct(stats.mean_return):>9}"
+                f"{_pct(stats.mean_mfe):>8}{_pct(stats.mean_mae):>8}{flag}"
+            )
+        print()
+
+    for band in (SCORE_GE_75, SCORE_GE_85):
+        verdict = assess_stability(results, band=band)
+        print(
+            f"  STABILITY {band}: better in {verdict.folds_better}/{verdict.folds_measured} folds, "
+            f"worse in {verdict.folds_worse}, median delta "
+            f"{_pct(verdict.median_delta)}"
+            f"{'  DOMINATED BY ONE FOLD' if verdict.dominated_by_one_fold else ''}"
+            f"{'  [consistent]' if verdict.consistent else '  [not consistent]'}"
+        )
+
+    _print_pooled_uncertainty(dated, horizon_name=horizon_name)
+    _print_subgroup(
+        dated,
+        title=f"YEAR STABILITY ({horizon_name}) -- episode level",
+        key=lambda row: row.year,
+        note="calendar years: crude on purpose, so they cannot be tuned to flatter a result",
+    )
+    _print_subgroup(
+        dated,
+        title=f"SECTOR STABILITY ({horizon_name}) -- episode level",
+        key=lambda row: row.sector,
+        note="watchlist sectors, unchanged; thin groups are marked and should not be read",
+    )
+    _print_extension(dated, horizon_name=horizon_name)
+
+
+def _print_pooled_uncertainty(rows: list[Any], *, horizon_name: str) -> None:
+    """Episode-level intervals over the pooled window.
+
+    Pooled *after* the per-fold table, never instead of it: pooling is what makes
+    an unstable effect look steady, so it is reported as the weaker evidence it
+    is.
+    """
+    baseline = [
+        row.raw_return
+        for _, row in _collapse(rows, threshold=float("-inf"), ceiling=THRESHOLD_75)
+        if row.raw_return is not None
+    ]
+    print(f"\n  POOLED EPISODE-LEVEL UNCERTAINTY ({horizon_name}, 95% bootstrap)")
+    print(f"    baseline <75      episodes={len(baseline):>5}  rate={_rate(_positive(baseline))}")
+
+    for label, threshold in ((SCORE_GE_75, THRESHOLD_75), (SCORE_GE_85, THRESHOLD_85)):
+        values = [
+            row.raw_return
+            for _, row in _collapse(rows, threshold=threshold, ceiling=float("inf"))
+            if row.raw_return is not None
+        ]
+        interval = bootstrap_positive_rate(values)
+        delta = bootstrap_difference(values, baseline)
+        print(
+            f"    {label:<17} episodes={len(values):>5}  rate={_rate(_positive(values))}  "
+            f"CI={_interval(interval)}  delta-vs-baseline CI={_interval(delta)}"
+        )
+
+
+def _collapse(rows: list[Any], *, threshold: float, ceiling: float) -> list[Any]:
+    selected = [row for row in rows if threshold <= row.score < ceiling]
+    return episodes_for(selected, threshold=threshold if threshold > float("-inf") else -1e9)
+
+
+def _positive(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(1 for value in values if value > 0) / len(values)
+
+
+def _interval(interval: tuple[float, float] | None) -> str:
+    if interval is None:
+        return "n/a (too thin)"
+    return f"[{interval[0] * 100:.1f}%, {interval[1] * 100:.1f}%]"
+
+
+def _episode_returns(rows: list[Any], *, threshold: float, ceiling: float) -> list[float]:
+    """Episode-level returns for one score band. Independence, not row count."""
+    return [
+        row.raw_return
+        for _, row in _collapse(rows, threshold=threshold, ceiling=ceiling)
+        if row.raw_return is not None
+    ]
+
+
+def _print_subgroup(
+    rows: list[Any], *, title: str, key: Any, note: str = "", min_episodes: int = 5
+) -> None:
+    """SCORE_GE_85 against baseline within each subgroup, always with n.
+
+    Subgroups are the existing deterministic splits (calendar year, watchlist
+    sector). No new grouping is invented here: searching for a subgroup where the
+    signal works is how a null result gets converted into a false positive, and
+    the more history there is the easier that search becomes.
+    """
+    groups = sorted({key(row) for row in rows if key(row) is not None}, key=str)
+    if not groups:
+        return
+
+    print(f"\n  {title}")
+    if note:
+        print(f"    {note}")
+    print(
+        f"    {'GROUP':<16}{'base eps':>10}{'base pos%':>11}"
+        f"{'GE85 eps':>10}{'GE85 pos%':>11}{'delta':>9}"
+    )
+    for group in groups:
+        subset = [row for row in rows if key(row) == group]
+        base = _episode_returns(subset, threshold=float("-inf"), ceiling=THRESHOLD_75)
+        high = _episode_returns(subset, threshold=THRESHOLD_85, ceiling=float("inf"))
+        base_rate = _positive(base)
+        high_rate = _positive(high)
+        delta = (
+            f"{(high_rate - base_rate) * 100:+.1f}pp"
+            if base_rate is not None and high_rate is not None
+            else "-"
+        )
+        thin = "  <- thin" if len(high) < min_episodes else ""
+        print(
+            f"    {group!s:<16}{len(base):>10}{_rate(base_rate):>11}"
+            f"{len(high):>10}{_rate(high_rate):>11}{delta:>9}{thin}"
+        )
+
+
+EXTENSION_FEATURES: tuple[str, ...] = (
+    "atr_pct",
+    "ema_spread_pct",
+    "rsi",
+    "relative_volume",
+    "volatility",
+)
+"""The phase-5.8 extension features, unchanged.
+
+Frozen deliberately: adding a feature here after seeing a null result would be
+searching for one that works, which is exactly the exhaustion analysis's failure
+mode rather than its purpose.
+"""
+
+
+def _print_extension(rows: list[Any], *, horizon_name: str) -> None:
+    """Does high extension worsen downside while leaving upside intact?
+
+    Buckets are **quantiles of the observed distribution**, not fixed cut points:
+    a hard threshold would be a parameter chosen on this data. The question is
+    directional -- does MAE deteriorate across buckets while MFE holds -- and it
+    is asked of the SCORE_GE_85 subset, because that is the population a future
+    entry rule would actually face.
+    """
+    high = [row for row in rows if row.score >= THRESHOLD_85]
+    print(f"\n  EXTENSION / EXHAUSTION ({horizon_name}, SCORE_GE_85 subset, n={len(high):,})")
+    if len(high) < 20:  # noqa: PLR2004
+        print("    too few observations to bucket")
+        return
+
+    for feature in EXTENSION_FEATURES:
+        buckets = by_feature_quantile(high, feature=feature, buckets=4)
+        if not buckets:
+            continue
+        print(f"    {feature}")
+        for bucket in buckets:
+            print(
+                f"      {bucket.label:<44}n={bucket.n:>5}  "
+                f"pos={_rate(bucket.positive_rate):>7}  "
+                f"MFE={_pct(bucket.mean_mfe):>8}  MAE={_pct(bucket.mean_mae):>8}"
+            )

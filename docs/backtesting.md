@@ -286,3 +286,68 @@ in this repository:
   years arguably makes this *worse*, since more delistings fall inside the window.
 - **Modelled costs.** No historical quotes exist at any depth, so every backtested
   cost remains `MODELLED`.
+
+## Walk-forward validation (phase 5.9)
+
+`app/research/walkforward.py` implements chronological out-of-sample evaluation
+of a **frozen** rule. Nothing is fitted: thresholds (75/85), `signal-v1`,
+`features-v1`, `scanner-v1`, `labels-v1` and the 24-hour episode definition are
+all fixed before it runs. What walks forward is the *question*, not a parameter.
+
+```bash
+python -m app.cli research walkforward --run-id 4 --folds 8 --horizons 1d,5d
+```
+
+### Three ways this could lie, and what stops each
+
+| Risk | Countermeasure |
+|---|---|
+| Fold boundaries picked after seeing results | `build_folds()` is a pure function of `(start, end, count, horizon)` and never sees an outcome |
+| An outcome window spilling into the next block | Observations within one horizon of a fold's end are **purged** |
+| Correlated rows counted as independent | Episodes collapse a run to one opportunity, assigned **within** a fold |
+
+Every fold is reported separately, with its `n`. Pooled figures appear *after*
+the per-fold table and never instead of it — pooling is exactly what makes an
+unstable effect look steady.
+
+`assess_stability()` reports `DOMINATED BY ONE FOLD` when removing the largest
+positive fold flips the average negative. That is the phase-5.8 failure made
+checkable rather than remembered.
+
+### Score bands, not `qualified`
+
+The grouping variable is `SCORE_GE_75` / `SCORE_GE_85`, **never** the production
+`qualified` flag.
+
+In the coarse long-history window `qualified` is *structurally impossible*:
+`DataQuality.is_actionable` is `OK`-only, context quality is the worst across all
+four timeframes, and 5m/15m have no bars before 2024-08 — so it is false for
+every row, not merely rare. `aligned` is likewise always false because it
+requires 15m. Grouping on either would compare an empty set against everything.
+
+Scores stay comparable because the signal engine scores from the **primary
+timeframe alone** (1h). That is the whole reason a coarse replay is worth
+running. A historical row that scored 86 was never *qualified* by the production
+rule, and calling it that would be a claim the data cannot support.
+
+### Running a replay next to the live scheduler
+
+Research and production share one SQLite file, and SQLite allows one writer.
+Phase 5.9 hit this for real: a four-year replay held a single write transaction
+for **53 minutes** (SQLAlchemy autoflushes before every read, so the first insert
+opened it), and the five-minute sync failed with `database is locked`.
+
+Three things keep them apart, and they are one decision, not three:
+
+1. `GRID_CHUNK` bounds instants per transaction;
+2. `session.autoflush = False` during replay — nothing there reads back what it
+   writes, so the lock is taken once, at commit;
+3. `SQLITE_BUSY_TIMEOUT_SECONDS = 30`, comfortably above a bulk commit and far
+   below any scheduling interval.
+
+`tests/integration/test_research_isolation.py` exercises this against a real
+file-backed database, because an in-memory `StaticPool` has one connection and
+therefore no contention to observe — which is why the suite missed it originally.
+
+For a long run, `make ops-stop` first and `make ops-start` after. Not required,
+but it removes the contention entirely and the replay finishes faster.

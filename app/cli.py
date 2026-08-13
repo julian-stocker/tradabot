@@ -1378,6 +1378,18 @@ def _run_research(settings: Settings, args: argparse.Namespace) -> int:
             )
         )
 
+    # `walkforward` reports several horizons in one pass, so it takes its own
+    # list rather than the single `--horizon` the descriptive reports use.
+    if command == "walkforward":
+        return asyncio.run(
+            research_cli.research_walkforward(
+                settings,
+                run_id=args.run_id,
+                folds=args.folds,
+                horizons=tuple(h.strip() for h in args.horizons.split(",") if h.strip()),
+            )
+        )
+
     horizon = Horizon(args.horizon)
     if command == "score-calibration":
         return asyncio.run(
@@ -1514,6 +1526,17 @@ def _add_scanner_parsers(sub: argparse._SubParsersAction) -> None:  # type: igno
     scanner_sub.add_parser("daily-summary", help="Send the daily report (alias)")
 
 
+def _add_walkforward_parser(research_sub: Any) -> None:
+    """The validation command, split out to keep its parent within budget."""
+    walk = research_sub.add_parser(
+        "walkforward",
+        help="Chronological out-of-sample validation by SCORE BAND (not `qualified`)",
+    )
+    walk.add_argument("--run-id", type=int, help="Restrict to one backtest run")
+    walk.add_argument("--folds", type=int, default=8, help="Chronological test blocks")
+    walk.add_argument("--horizons", default="1d,5d", help="Comma-separated outcome horizons")
+
+
 def _add_research_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Backtesting, outcome labelling and research commands.
 
@@ -1561,6 +1584,8 @@ def _add_research_parsers(sub: argparse._SubParsersAction) -> None:  # type: ign
 
     research = sub.add_parser("research", help="Descriptive research reports and dataset export")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+
+    _add_walkforward_parser(research_sub)
 
     for name, helptext in (
         ("score-calibration", "Outcome quality by score band (measurement only)"),
