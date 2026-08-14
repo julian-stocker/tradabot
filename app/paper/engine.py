@@ -54,6 +54,7 @@ from app.paper.exits import (
 from app.paper.portfolio import PortfolioValuation, record_valuation, value_portfolio
 from app.paper.repository import PaperTradingRepository
 from app.paper.risk_gate import (
+    MAX_COST_SHARE_OF_RISK,
     RiskDecision,
     RiskFlag,
     RiskGateDecision,
@@ -140,6 +141,7 @@ class PaperTradingEngine:
         risk_layer_enabled: bool = False,
         fractionality: ExecutionFractionality = ExecutionFractionality.FRACTIONAL_ALLOWED,
         enforce_cost_share: bool = True,
+        max_cost_share: Decimal = MAX_COST_SHARE_OF_RISK,
     ) -> None:
         self._repository = repository
         self._profile = profile
@@ -153,6 +155,7 @@ class PaperTradingEngine:
         self._risk_layer_enabled = risk_layer_enabled
         self._fractionality = fractionality
         self._enforce_cost_share = enforce_cost_share
+        self._max_cost_share = max_cost_share
         self._broker = PaperBroker(repository.session, profile, portfolio)
 
     @property
@@ -242,6 +245,7 @@ class PaperTradingEngine:
                 costs=self._profile.costs.to_cost_settings(),
                 quote=quote,
                 enforce_cost_share=self._enforce_cost_share,
+                max_cost_share=self._max_cost_share,
             )
             if not gate.permits_entry:
                 return await self._rejected_entry(

@@ -169,6 +169,7 @@ def evaluate_entry(
     quote: Quote | None = None,
     allow_stale: bool = False,
     enforce_cost_share: bool = True,
+    max_cost_share: Decimal = MAX_COST_SHARE_OF_RISK,
 ) -> RiskGateDecision:
     """Decide what the risk layer permits, before the engine sizes anything.
 
@@ -187,9 +188,14 @@ def evaluate_entry(
         allow_stale: whether a stale estimate may still gate an entry. Default
             False: a risk number computed from bars that stopped arriving is
             not a risk number.
-        enforce_cost_share: whether the 35% backstop may reject. Exposed so a
+        enforce_cost_share: whether the cost backstop may reject. Exposed so a
             replay can measure what the backstop actually changes; production
             leaves it on.
+        max_cost_share: the ceiling itself, defaulting to the production
+            constant. A parameter rather than a second gate: phase 12.2 needs to
+            sweep 10/15/20/25/35% to find the capital at which execution becomes
+            economic, and forking the gate to do that would put two cost rules
+            in the codebase where there must be exactly one.
 
     Returns a decision. A refusal is an outcome, never an exception -- the
     engine records it and moves on to the next candidate.
@@ -259,7 +265,7 @@ def evaluate_entry(
             **common,  # type: ignore[arg-type]
         )
 
-    if enforce_cost_share and estimated_cost > risk_budget * MAX_COST_SHARE_OF_RISK:
+    if enforce_cost_share and estimated_cost > risk_budget * max_cost_share:
         return RiskGateDecision(
             decision=RiskDecision.REJECTED,
             reason=RiskRejectionReason.COST_EXCEEDS_RISK_SHARE,

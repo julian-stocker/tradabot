@@ -41,6 +41,8 @@ from decimal import Decimal, InvalidOperation
 from functools import partial
 from typing import Any, Final, TypeVar
 
+from pydantic import ValidationError
+
 from app.core.config import AlpacaSettings, MarketDataSettings
 from app.core.errors import ConfigurationError, ProviderError
 from app.core.logging import get_logger
@@ -704,11 +706,32 @@ def normalise_corporate_actions(response: Any, *, symbol: str) -> list[Corporate
     and is not.
     """
     actions: list[CorporateAction] = []
+    rejected = 0
+    first_reason = ""
     for kind, entries in _iter_action_groups(response):
         for entry in entries:
-            action = _map_action(kind, entry, symbol)
+            try:
+                action = _map_action(kind, entry, symbol)
+            except ValidationError as exc:
+                # One malformed provider record must not abort a whole universe.
+                # Phase 12.2 hit exactly this: Alpaca reported an ALL dividend
+                # paying before its own ex-date, the domain validator correctly
+                # refused it, and the exception killed a 1,000-instrument fetch
+                # partway through. The validator stays strict; the *ingestion*
+                # skips and counts, matching how malformed candles are handled.
+                rejected += 1
+                first_reason = first_reason or str(exc).split("\n")[0]
+                continue
             if action is not None:
                 actions.append(action)
+    if rejected:
+        logger.warning(
+            "rejected malformed corporate actions",
+            provider="alpaca",
+            symbol=symbol,
+            rejected=rejected,
+            first_reason=first_reason,
+        )
     return sorted(actions, key=lambda a: a.effective_at)
 
 

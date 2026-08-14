@@ -386,7 +386,24 @@
       "Bash(awk '{print \"wal\",$5}')",
       "Bash(.venv/bin/mypy --strict app/research/phase12.py)",
       "Bash(awk '{print \"db bytes\",$5}')",
-      "Bash(awk '{print $1,$2}')"
+      "Bash(awk '{print $1,$2}')",
+      "Bash(.venv/bin/mypy --strict app/research/phase12_1.py)",
+      "Bash(PYTHONPATH=. nohup .venv/bin/python /private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/3b037a42-190e-44b7-9969-6ff16a10be3a/scratchpad/backfill.py)",
+      "Bash(grep -cE \"UNEXPLAINED$\")",
+      "Bash(awk '/^UNEXPLAINED:/{f=1;next} /^\\(CONTRADICTED|EXPLAINED|MARKET_GAP\\):/{f=0} f && /UNEXPLAINED$/{print $1}')",
+      "Bash(awk '{print $2}')",
+      "Bash(PYTHONPATH=. nohup .venv/bin/python -m app.cli market-data corporate-actions)",
+      "Bash(.venv/bin/mypy --strict app/market_data/providers/alpaca.py)",
+      "Bash(PYTHONPATH=. nohup .venv/bin/python /private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/3b037a42-190e-44b7-9969-6ff16a10be3a/scratchpad/capital.py)",
+      "Bash(grep -E \"CONTRADICTED$\")",
+      "Bash(awk '{print \"running, cpu\",$3\"%\"}')",
+      "Bash(awk '{print \"elapsed\",$10,\"cpu\",$3\"%\"}')",
+      "Bash(PYTHONPATH=.:/private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/3b037a42-190e-44b7-9969-6ff16a10be3a/scratchpad nohup .venv/bin/python -u /private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/3b037a42-190e-44b7-9969-6ff16a10be3a/scratchpad/contrib.py)",
+      "Bash(grep -v \"^$\")",
+      "Bash(.venv/bin/mypy --strict app/broker/paper_accounts.py)",
+      "Bash(.venv/bin/mypy --strict app/notifications/paper_events.py)",
+      "Bash(.venv/bin/mypy --strict app/notifications/)",
+      "Bash(awk '{print \"env mtime:\",$6,$7,$8}')"
     ]
   }
 }
