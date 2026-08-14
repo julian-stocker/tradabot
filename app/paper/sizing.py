@@ -33,14 +33,44 @@ arbitrary position size that looks principled. The behaviour is configurable:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 
 from app.domain.enums import OrderRejectionReason
+from app.paper.execution import estimate_round_trip_cost
 from app.simulation.models import SimulationProfileConfig
 
 QUANTITY_EXPONENT = Decimal("0.00000001")
+WHOLE_SHARE_EXPONENT = Decimal(1)
 ZERO = Decimal(0)
+
+
+class ExecutionFractionality(StrEnum):
+    """Whether the venue will fill part of a share.
+
+    Not cosmetic. Every cap in this module is an *upper* bound derived from risk,
+    cash or exposure, so the only safe way to land on a tradable quantity is to
+    round **down**. Rounding up by even one share breaches whichever constraint
+    was binding -- and on an expensive instrument in a small account, one share
+    is the entire position.
+
+    ``WHOLE_SHARES_ONLY`` therefore makes a real constraint visible rather than
+    approximating it away: a €100 account that cannot afford one share of a €250
+    instrument gets ``QUANTITY_TOO_SMALL``, not 0.4 shares it cannot buy.
+    """
+
+    FRACTIONAL_ALLOWED = "FRACTIONAL_ALLOWED"
+    WHOLE_SHARES_ONLY = "WHOLE_SHARES_ONLY"
+
+
+def _round_to_tradable(quantity: Decimal, fractionality: ExecutionFractionality) -> Decimal:
+    """Reduce a computed quantity to one the venue can fill. **Never rounds up.**"""
+    exponent = (
+        WHOLE_SHARE_EXPONENT
+        if fractionality is ExecutionFractionality.WHOLE_SHARES_ONLY
+        else QUANTITY_EXPONENT
+    )
+    return quantity.quantize(exponent, rounding=ROUND_DOWN)
 
 
 class SizingConstraint(StrEnum):
@@ -76,7 +106,8 @@ class SizingResult:
         return self.quantity > 0 and self.rejection is None
 
 
-def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a distinct outcome
+def size_position(  # noqa: PLR0911, PLR0912 -- one branch and one return per rejection
+    # cause; merging any two would report the wrong reason for refusing a trade
     *,
     profile: SimulationProfileConfig,
     equity: Decimal,
@@ -84,6 +115,7 @@ def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a
     current_exposure: Decimal,
     entry_price: Decimal,
     stop_loss: Decimal | None,
+    fractionality: ExecutionFractionality = ExecutionFractionality.FRACTIONAL_ALLOWED,
 ) -> SizingResult:
     """Size a long entry for one profile.
 
@@ -96,6 +128,8 @@ def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a
         entry_price: expected fill price. The *fill*, not the mid -- sizing
             against the mid would systematically overshoot.
         stop_loss: the protective level. ``None`` triggers the policy above.
+        fractionality: whether partial shares are fillable. Either way the final
+            quantity is rounded **down**, because every cap here is a maximum.
 
     Returns:
         A :class:`SizingResult`. A rejection is an outcome, not an exception.
@@ -184,7 +218,8 @@ def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a
     if exposure_cap < quantity:
         quantity, constraint = exposure_cap, SizingConstraint.MAX_TOTAL_EXPOSURE
 
-    quantity = quantity.quantize(QUANTITY_EXPONENT)
+    unrounded = quantity
+    quantity = _round_to_tradable(quantity, fractionality)
 
     if quantity <= 0:
         return SizingResult(
@@ -192,7 +227,8 @@ def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a
             constraint=constraint,
             rejection=OrderRejectionReason.QUANTITY_TOO_SMALL,
             detail=(
-                f"sized quantity rounds to zero at {entry_price} per unit "
+                f"sized quantity {unrounded:.8f} rounds down to zero at "
+                f"{entry_price} per unit under {fractionality.value} "
                 f"(bound by {constraint.value if constraint else 'unknown'})"
             ),
             risk_budget=risk_budget,
@@ -200,6 +236,37 @@ def size_position(  # noqa: PLR0911 -- one return per rejection cause; each is a
         )
 
     notional = quantity * entry_price
+
+    # A position must be able to pay for its own exit.
+    #
+    # Nothing above guarantees this. The cash cap reserves the *entry* fee, but a
+    # flat exit fee is charged against whatever the position is worth when it
+    # closes -- so a position worth less than that fee returns **negative** cash
+    # on exit. Phase 11.4 hit it: a EUR 100 portfolio ran 52 trades, paid EUR 104
+    # in fees, and drove cash to -0.24, violating the ``cash >= 0`` check
+    # constraint the schema declares. The engine reached a state its own database
+    # forbids, and crashed rather than refusing.
+    #
+    # This is a practicality test, not reserved capital: no balance is held back
+    # and no new capital concept exists. It only refuses to open a position whose
+    # entire value is smaller than the cost of getting out of it, which is never
+    # a trade worth making at any account size.
+    round_trip = estimate_round_trip_cost(
+        settings=profile.costs.to_cost_settings(), notional=notional
+    )
+    if notional <= round_trip:
+        return SizingResult(
+            quantity=ZERO,
+            constraint=constraint,
+            rejection=OrderRejectionReason.BELOW_MIN_NOTIONAL,
+            detail=(
+                f"position notional {notional:.2f} does not cover its own "
+                f"{round_trip:.2f} round-trip cost"
+            ),
+            risk_budget=risk_budget,
+            risk_per_share=risk_per_share,
+        )
+
     if notional < profile.costs.min_order_notional:
         return SizingResult(
             quantity=ZERO,

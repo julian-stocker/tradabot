@@ -170,6 +170,45 @@ def price_fill(
     )
 
 
+def estimate_round_trip_cost(
+    *,
+    settings: CostSettings,
+    notional: Decimal,
+    quote: Quote | None = None,
+) -> Decimal:
+    """Modelled cost of entering and later exiting a position of ``notional``.
+
+    **The single source of truth for "what will this trade cost".** Before this
+    existed, the risk gate took a caller-supplied estimate, which meant the
+    number constraining a position and the number actually charged came from two
+    places and could silently disagree.
+
+    Both legs are counted, because a risk budget has to survive the exit as well
+    as the entry:
+
+    * two order fees, and the variable fee on both notionals;
+    * the half-spread crossed twice;
+    * slippage twice, at the configured multiple of the half-spread.
+
+    The exit notional is approximated by the entry notional. That is a
+    simplification and a deliberate one: the true exit size depends on where the
+    position is closed, which is unknowable at entry, and assuming it equals the
+    entry is neutral rather than optimistic.
+    """
+    if notional <= 0:
+        return Decimal(0)
+
+    if quote is not None and quote.mid_price > 0:
+        half_spread_rate = quote.half_spread / quote.mid_price
+    else:
+        half_spread_rate = Decimal(str(settings.default_spread_bps)) / BPS / Decimal(2)
+
+    spread_cost = half_spread_rate * notional * Decimal(2)
+    slippage_cost = half_spread_rate * settings.slippage_spread_multiple * notional * Decimal(2)
+    fees = (settings.order_fee * Decimal(2)) + (settings.variable_fee_rate * notional * Decimal(2))
+    return _quantize_money(spread_cost + slippage_cost + fees)
+
+
 def liquidation_value(*, quantity: Decimal, quote: Quote | None, mark_price: Decimal) -> Decimal:
     """What a long position is worth if closed right now.
 

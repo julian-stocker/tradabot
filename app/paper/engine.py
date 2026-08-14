@@ -25,6 +25,7 @@ combination that fills at or before the signal bar. See docs/simulation-timing.m
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -41,6 +42,7 @@ from app.domain.enums import (
 )
 from app.domain.quotes import Quote
 from app.market_data.calendars import TradingCalendar, get_trading_calendar
+from app.market_data.risk import ShortHorizonRisk
 from app.paper.broker import OrderRequest, PaperBroker
 from app.paper.execution import liquidation_value
 from app.paper.exits import (
@@ -51,6 +53,13 @@ from app.paper.exits import (
 )
 from app.paper.portfolio import PortfolioValuation, record_valuation, value_portfolio
 from app.paper.repository import PaperTradingRepository
+from app.paper.risk_gate import (
+    RiskDecision,
+    RiskFlag,
+    RiskGateDecision,
+    evaluate_entry,
+    flag_against_band,
+)
 from app.paper.sessions import (
     SessionState,
     daily_loss_breached,
@@ -58,7 +67,7 @@ from app.paper.sessions import (
     holding_period_expired_at,
     resolve_session,
 )
-from app.paper.sizing import size_position
+from app.paper.sizing import ExecutionFractionality, size_position
 from app.simulation.models import SimulationProfileConfig
 
 logger = get_logger(__name__)
@@ -128,6 +137,9 @@ class PaperTradingEngine:
         *,
         ambiguity_policy: CandleAmbiguityPolicy = CandleAmbiguityPolicy.CONSERVATIVE,
         calendar: TradingCalendar | None = None,
+        risk_layer_enabled: bool = False,
+        fractionality: ExecutionFractionality = ExecutionFractionality.FRACTIONAL_ALLOWED,
+        enforce_cost_share: bool = True,
     ) -> None:
         self._repository = repository
         self._profile = profile
@@ -136,6 +148,11 @@ class PaperTradingEngine:
         # Defaults to NYSE hours. A caller with an instrument in hand should pass
         # that venue's calendar; the default is documented rather than silent.
         self._calendar = calendar or get_trading_calendar("XNYS")
+        # Off by default. The risk layer is additive, and a default of False is
+        # what makes "baseline" a thing you can actually run rather than assert.
+        self._risk_layer_enabled = risk_layer_enabled
+        self._fractionality = fractionality
+        self._enforce_cost_share = enforce_cost_share
         self._broker = PaperBroker(repository.session, profile, portfolio)
 
     @property
@@ -159,6 +176,7 @@ class PaperTradingEngine:
         execution_price: Decimal,
         quote: Quote | None,
         atr: Decimal | None,
+        risk: ShortHorizonRisk | None = None,
     ) -> EntryOutcome:
         """Attempt to open a position from an accepted trade decision.
 
@@ -175,6 +193,9 @@ class PaperTradingEngine:
             quote: live top-of-book, if available.
             atr: ATR at signal time, for stop placement. ``None`` means no
                 risk-based size is possible.
+            risk: the rolling risk-v1 estimate, supplied by the caller because
+                the engine has no market-data dependency. Ignored entirely when
+                the risk layer is disabled.
 
         Raises:
             LookAheadError: execution is not strictly after the signal bar.
@@ -206,6 +227,38 @@ class PaperTradingEngine:
             take_profit_r_multiple=self._profile.risk.take_profit_r_multiple,
         )
 
+        # --- Risk layer -------------------------------------------------
+        # Sits between the stop and the sizer, and touches exactly two things: it
+        # may widen the stop to the noise floor, and it may refuse. It never
+        # computes a quantity -- ``size_position`` below stays the only thing
+        # that does, so there is no second sizer to drift out of agreement.
+        gate: RiskGateDecision | None = None
+        if self._risk_layer_enabled:
+            gate = evaluate_entry(
+                risk=risk,
+                entry_price=expected_fill,
+                structural_stop=stop_loss,
+                risk_budget=valuation.equity * self._profile.risk.risk_per_trade,
+                costs=self._profile.costs.to_cost_settings(),
+                quote=quote,
+                enforce_cost_share=self._enforce_cost_share,
+            )
+            if not gate.permits_entry:
+                return await self._rejected_entry(
+                    instrument,
+                    trade_decision_id,
+                    key,
+                    execution_timestamp,
+                    OrderRejectionReason.RISK_DATA_UNAVAILABLE
+                    if gate.decision is RiskDecision.UNAVAILABLE
+                    else OrderRejectionReason.RISK_LIMIT,
+                    f"{gate.reason.value if gate.reason else 'risk'}: {gate.detail}",
+                )
+            if gate.risk_distance is not None:
+                # Back to a price, because that is what the sizer and the exit
+                # logic both speak. The distance may only have widened.
+                stop_loss = expected_fill - gate.risk_distance
+
         sizing = size_position(
             profile=self._profile,
             equity=valuation.equity,
@@ -213,6 +266,7 @@ class PaperTradingEngine:
             current_exposure=valuation.gross_exposure,
             entry_price=expected_fill,
             stop_loss=stop_loss,
+            fractionality=self._fractionality,
         )
         if not sizing.is_tradable:
             return await self._rejected_entry(
@@ -253,6 +307,9 @@ class PaperTradingEngine:
                 detail=order.rejection_detail,
             )
 
+        if order.position_id is not None:
+            await self._record_risk_metadata(order.position_id, gate)
+
         return EntryOutcome(
             accepted=True,
             order_id=order.id,
@@ -260,6 +317,70 @@ class PaperTradingEngine:
             rejection=None,
             detail=sizing.detail,
         )
+
+    async def refresh_risk_flags(
+        self,
+        *,
+        risks: Mapping[int, ShortHorizonRisk | None],
+        now: datetime,
+    ) -> dict[int, RiskFlag]:
+        """Recompute the descriptive risk flag on every open position.
+
+        This is the rolling half of risk-v1: a position held for twenty days
+        does not keep its entry-day risk number, it gets a fresh one-to-three-day
+        number each time this runs.
+
+        **It cannot close anything.** The method writes two columns and returns a
+        mapping; there is no exit path here, and :class:`RiskFlag` has no member
+        meaning "sell". A position whose risk doubled is flagged and left open,
+        because deciding what to do about that belongs to a position-management
+        phase that does not exist.
+
+        Args:
+            risks: current estimate per instrument id. A missing or ``None``
+                entry yields ``DATA_STALE`` rather than leaving the previous
+                flag in place, so a stale row never reads as a fresh assessment.
+            now: timestamp to stamp onto the refreshed rows.
+
+        Returns:
+            The new flag per position id.
+        """
+        flags: dict[int, RiskFlag] = {}
+        for position in await self._repository.open_positions(self._profile.id or 0):
+            flag = flag_against_band(
+                entry_band_1d=position.risk_band_1d,
+                current_risk=risks.get(position.instrument_id),
+            )
+            position.risk_flag = flag.value
+            position.risk_flag_updated_at = now
+            flags[position.id] = flag
+        return flags
+
+    async def _record_risk_metadata(self, position_id: int, gate: RiskGateDecision | None) -> None:
+        """Stamp the position with what the risk layer saw at entry.
+
+        Written after the position exists rather than threaded through the
+        broker: the broker's job is fills, and giving it risk fields would make
+        it a second place where risk decisions could be made.
+
+        The fractionality mode is recorded even with the risk layer off, because
+        it changed the quantity either way and a mixed table with no mode column
+        cannot be read.
+        """
+        position = await self._repository.get_position(position_id)
+        if position is None:  # pragma: no cover -- the broker just created it
+            return
+        position.execution_fractionality = self._fractionality.value
+        if gate is None:
+            return
+        position.risk_structural_distance = gate.structural_distance
+        position.risk_noise_floor = gate.noise_floor
+        position.risk_distance = gate.risk_distance
+        position.risk_floor_bound = gate.tighter_than_noise
+        position.risk_regime = gate.regime
+        position.risk_band_1d = gate.risk_band_1d
+        position.risk_estimated_cost = gate.estimated_cost
+        position.risk_model_version = gate.risk_model_version
 
     async def _rejected_entry(
         self,

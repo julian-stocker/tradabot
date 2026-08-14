@@ -411,6 +411,80 @@ class VirtualPosition(Base, TimestampMixin):
         ),
     )
 
+    stop_excess_loss: Mapped[Decimal | None] = mapped_column(
+        Money(MONEY_PRECISION, MONEY_SCALE),
+        nullable=True,
+        doc=(
+            "Loss beyond the requested stop, in currency, when the exit gapped "
+            "through it. Persisted rather than derived so a risk-breach audit "
+            "reads actual outcomes instead of recomputing them from prices that "
+            "have since been split-adjusted. Zero when the stop held; NULL when "
+            "the position did not exit on its stop."
+        ),
+    )
+
+    # -- risk-v1 metadata, additive ---------------------------------------
+    # All nullable. A position opened with the risk layer disabled carries NULL
+    # here, which is the honest record -- a zero would claim the layer ran and
+    # found nothing to say.
+    risk_structural_distance: Mapped[Decimal | None] = mapped_column(
+        Money(PRICE_PRECISION, PRICE_SCALE),
+        nullable=True,
+        doc="Stop distance the ATR rule proposed, before the noise floor.",
+    )
+    risk_noise_floor: Mapped[Decimal | None] = mapped_column(
+        Money(PRICE_PRECISION, PRICE_SCALE),
+        nullable=True,
+        doc="Minimum distance below which a stop sits inside ordinary noise.",
+    )
+    risk_distance: Mapped[Decimal | None] = mapped_column(
+        Money(PRICE_PRECISION, PRICE_SCALE),
+        nullable=True,
+        doc="The distance actually used: max(structural, floor).",
+    )
+    risk_floor_bound: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        doc=(
+            "True when the floor widened the stop. Recorded per position because "
+            "a strategy that keeps proposing sub-noise stops is saying something "
+            "about itself, and only the rate reveals it."
+        ),
+    )
+    risk_regime: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, doc="volatility-v1 regime at entry."
+    )
+    risk_band_1d: Mapped[Decimal | None] = mapped_column(
+        Money(PRICE_PRECISION, PRICE_SCALE),
+        nullable=True,
+        doc="The 80% one-day band, in percent, at entry. For the breach audit.",
+    )
+    risk_estimated_cost: Mapped[Decimal | None] = mapped_column(
+        Money(MONEY_PRECISION, MONEY_SCALE),
+        nullable=True,
+        doc="Round-trip cost the gate modelled, from the canonical cost model.",
+    )
+    risk_model_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    execution_fractionality: Mapped[str | None] = mapped_column(
+        String(24),
+        nullable=True,
+        doc=(
+            "Whether partial shares were permitted when this position was sized. "
+            "Persisted because the same candidate produces a different position "
+            "under each mode, and a mixed table would otherwise be unreadable."
+        ),
+    )
+    risk_flag: Mapped[str | None] = mapped_column(
+        String(24),
+        nullable=True,
+        doc=(
+            "Latest descriptive risk state from the rolling recompute. "
+            "**Never triggers an exit** -- an input to a position-management "
+            "phase that does not exist."
+        ),
+    )
+    risk_flag_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
     __table_args__ = (
         CheckConstraint("quantity > 0", name="quantity_positive"),
         CheckConstraint("average_entry_price > 0", name="entry_price_positive"),

@@ -203,6 +203,19 @@ class ShortHorizonRisk:
         phase 11.1 measured a stop at half the 1-day band being touched 34% of
         the time within a single session. Choosing the actual stop belongs to a
         position-management phase that does not exist yet.
+
+        Consequence, measured in phase 11.3
+        -----------------------------------
+        The floor is the **full** band, and every ``K_BAND`` constant is at least
+        3.11. So the floor exceeds a ``2.0 x ATR`` structural stop in all four
+        regimes, always -- and the replay found it widening 100% of permitted
+        entries, not a subset of them.
+
+        That means a profile with ``stop_loss_atr_multiple = 2.0`` running with
+        the risk layer enabled is not really using its ATR multiple: risk-v1's
+        band sets the stop on every trade. The setting is not ignored, it is
+        dominated. Stated here rather than fixed by loosening the floor, which
+        would mean tuning a frozen constant against a replay.
         """
         return self.band(horizon)
 

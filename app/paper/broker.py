@@ -49,6 +49,7 @@ from app.broker.protocols import AccountState, OrderState, OrderStatus
 from app.core.logging import get_logger
 from app.db.models import VirtualOrder, VirtualPortfolio, VirtualPosition
 from app.domain.enums import (
+    ExitReason,
     OrderRejectionReason,
     OrderType,
     PositionStatus,
@@ -503,6 +504,18 @@ class PaperBroker:
         position.exit_reason = exit_reason  # type: ignore[assignment]
         position.exit_was_gap = gapped
         position.exit_was_ambiguous = ambiguous
+        # What the gap actually cost beyond the stop. Recorded on every stop
+        # exit, including the ones that held (zero), so an audit can compute a
+        # breach *rate* rather than only inspecting the breaches -- a table
+        # containing only failures cannot tell you how often they happen.
+        if exit_reason is ExitReason.STOP_LOSS and position.stop_loss is not None:
+            # Measured against ``exit_price``, the level the exit happened at,
+            # **not** ``pricing.fill_price``. The fill is a half-spread and some
+            # slippage below the level on every stop, gap or no gap; charging
+            # that to the risk model would report a breach on trades where the
+            # stop worked perfectly. What this column means is the gap alone.
+            shortfall = position.stop_loss - exit_price
+            position.stop_excess_loss = max(ZERO, shortfall) * position.quantity
         position.exit_costs = pricing.total_cost
         position.realized_pnl = realized
         position.unrealized_pnl = ZERO

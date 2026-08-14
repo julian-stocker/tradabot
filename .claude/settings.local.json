@@ -369,7 +369,24 @@
       "Bash(awk '{printf \"%.3f GiB\\\\n\",$1/1073741824}')",
       "Bash(.venv/bin/mypy app/market_data/risk.py --strict)",
       "Bash(cat)",
-      "Bash(PYTHONPATH=/Users/julianstocker/Documents/tradabot .venv/bin/python /tmp/sizing.py)"
+      "Bash(PYTHONPATH=/Users/julianstocker/Documents/tradabot .venv/bin/python /tmp/sizing.py)",
+      "Bash(.venv/bin/mypy app/paper/risk_gate.py --strict)",
+      "Bash(.venv/bin/mypy --strict app/paper/sizing.py app/paper/execution.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/risk_gate.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/engine.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/)",
+      "Bash(.venv/bin/mypy --strict app/paper/broker.py)",
+      "Bash(.venv/bin/mypy --strict app/research/phase11_3.py)",
+      "Bash(.venv/bin/mypy --strict app)",
+      "Bash(.venv/bin/mypy --strict app/research/phase11_4.py)",
+      "Bash(PYTHONPATH=. LOG_LEVEL=ERROR .venv/bin/python -c ' *)",
+      "Bash(PYTHONPATH=. nohup .venv/bin/python /private/tmp/claude-501/-Users-julianstocker-Documents-tradabot/3b037a42-190e-44b7-9969-6ff16a10be3a/scratchpad/run_portfolio.py all)",
+      "Bash(awk '{print $5\\\\\" bytes\\\\\"}')",
+      "Bash(awk '{print $5}')",
+      "Bash(awk '{print \"wal\",$5}')",
+      "Bash(.venv/bin/mypy --strict app/research/phase12.py)",
+      "Bash(awk '{print \"db bytes\",$5}')",
+      "Bash(awk '{print $1,$2}')"
     ]
   }
 }

@@ -351,6 +351,14 @@ class OrderRejectionReason(StrEnum):
     BELOW_MIN_NOTIONAL = "BELOW_MIN_NOTIONAL"
     QUANTITY_TOO_SMALL = "QUANTITY_TOO_SMALL"
     INSTRUMENT_NOT_TRADABLE = "INSTRUMENT_NOT_TRADABLE"
+    RISK_LIMIT = "RISK_LIMIT"
+    """The risk layer refused on arithmetic: size, cost share or budget."""
+
+    RISK_DATA_UNAVAILABLE = "RISK_DATA_UNAVAILABLE"
+    """No usable risk estimate existed. Kept separate from ``RISK_LIMIT``: a
+    trade that was never judged reads differently from one that was judged and
+    failed, and collapsing them would hide a data outage as a risk decision."""
+
     PROFILE_DISABLED = "PROFILE_DISABLED"
     SHORT_NOT_SUPPORTED = "SHORT_NOT_SUPPORTED"
     UNSUPPORTED_ORDER_TYPE = "UNSUPPORTED_ORDER_TYPE"
