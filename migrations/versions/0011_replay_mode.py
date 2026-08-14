@@ -37,9 +37,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "backtest_runs",
-        sa.Column(
-            "available_timeframes", sa.String(length=64), nullable=False, server_default=""
-        ),
+        sa.Column("available_timeframes", sa.String(length=64), nullable=False, server_default=""),
     )
     op.create_index("ix_backtest_runs_replay_mode", "backtest_runs", ["replay_mode"])
 

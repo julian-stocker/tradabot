@@ -15,7 +15,6 @@ from alembic import op
 
 import app.db.types
 
-
 revision: str = "0006"
 down_revision: str | None = "0005"
 branch_labels: str | Sequence[str] | None = None

@@ -90,6 +90,25 @@ candles: sixteen splits appeared as one-bar returns of −95% to +686%, and
 change any phase-6 verdict — rank-based bucketing absorbed it — but it did
 matter for magnitude features. See [market-context.md](market-context.md).
 
+## Phase 10.1: the first external directional source also fails
+
+SEC EDGAR was selected as the first genuinely independent information source —
+free, 17 years deep, exact `acceptanceDateTime`, restatements preserved. The
+frozen hypothesis was as-first-reported diluted EPS YoY growth > +20% versus
+< −20%, entered at the first bar after SEC acceptance.
+
+On 167 events it looked like the largest directional separation this project had
+seen (+8 to +11pp). On **916** events — the same hypothesis, the same
+thresholds, 52 symbols instead of 10 — the spread is −0.1pp at 1d, +4.4pp at 5d,
+and **inverts to −4.5pp and −6.0pp** at 10d and 20d. Every year reverses.
+
+A matched baseline (same symbol, same year) shows all three buckets lifting at
+5d, with DECLINE *beating* STRONG_GROWTH at 10d and 20d. The filing event
+carries something; EPS growth direction does not order it.
+
+Classification: `NO_STABLE_DIRECTIONAL_INFORMATION`. See
+[options-collection.md](options-collection.md).
+
 ## Why no signal-v2 was built
 
 The brief's own rule: *do not manufacture a composite before validating its

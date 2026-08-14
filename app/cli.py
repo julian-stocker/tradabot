@@ -41,9 +41,11 @@ from app.market_data.calendars import get_trading_calendar
 from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
 from app.market_data.integrity import DiscontinuityKind, scan_price_series
+from app.market_data.options_service import OptionSnapshotService, within_capture_window
 from app.market_data.provider import MarketDataProvider
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
+from app.market_data.risk import EXTREME_UNDER_COVERAGE_NOTE, SUPPORTED_HORIZONS, assess
 from app.market_data.volatility import MODEL_VERSION, VolatilityRegime
 from app.market_data.volatility_service import DISCLAIMER as VOLATILITY_DISCLAIMER
 from app.market_data.volatility_service import VolatilityService
@@ -76,6 +78,7 @@ from app.paper.performance import PerformanceSummary
 from app.paper.replay import REPLAY_DISCLAIMER, ReplayError, replay_symbol
 from app.research import cli as research_cli
 from app.scanner.demo import DemoResult, phase_boundaries, seed_demo_instrument
+from app.scanner.enums import SessionPhase
 from app.scanner.repository import (
     ScanRunRepository,
     SignalEvaluationRepository,
@@ -358,6 +361,112 @@ async def _sync_actions_for(
         except (ProviderError, InstrumentNotFoundError) as exc:
             logger.warning("corporate action sync failed", symbol=symbol, error=str(exc))
     return written
+
+
+async def _risk(settings: Settings, symbols: list[str] | None) -> int:
+    """Short-horizon movement risk, read-only and magnitude-only.
+
+    No provider call: every input is a stored candle, so this answers from what
+    the sync job already downloaded. The estimate is a **rolling** one -- it
+    describes the next one to three sessions from the current information state,
+    not the lifetime of any position.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            wanted = symbols or list(await WatchlistRepository(session).symbols())
+            snapshot = await VolatilityService(session).for_symbols(wanted)
+
+        estimates = [assess(m) for m in snapshot.estimates]
+        estimates.sort(key=lambda r: r.risk_band_1d, reverse=True)
+
+        print("\nshort-horizon movement risk   model risk-v1 / volatility-v1")
+        print(
+            f"calibrated horizons: {', '.join(f'{h}d' for h in SUPPORTED_HORIZONS)}"
+            f"   band coverage 80%\n"
+        )
+        print(
+            f"{'symbol':<8}{'regime':<14}{'pct':>5}{'ATR%':>7}"
+            f"{'1d typ':>8}{'1d band':>9}{'1d stress':>11}"
+            f"{'3d typ':>8}{'3d band':>9}{'gap':>7}{'data':>7}"
+        )
+        for r in estimates:
+            print(
+                f"{r.symbol:<8}{r.regime.value:<14}{r.percentile * 100:>4.0f}"
+                f"{r.atr_pct:>7.2f}{r.expected_move_1d:>8.2f}{r.risk_band_1d:>9.2f}"
+                f"{r.stress_move_1d:>11.2f}{r.expected_move_3d:>8.2f}"
+                f"{r.risk_band_3d:>9.2f}{r.overnight_gap_pct:>7.2f}"
+                f"{r.data_quality:>7}"
+            )
+
+        if snapshot.symbols_failed:
+            print(f"\n{snapshot.symbols_failed} symbol(s) had too little history to estimate.")
+        print("\nMagnitude only — not a direction forecast, target or probability of profit.")
+        print("Markets can exceed these ranges, particularly through overnight gaps:")
+        print("  the gap column is an 80th-percentile overnight move and is part of,")
+        print("  not additional to, the 1d band.")
+        print(f"\n{EXTREME_UNDER_COVERAGE_NOTE}")
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _options_capture(settings: Settings, *, dry_run: bool, force: bool) -> int:
+    """Capture one point-in-time option surface per watchlist symbol.
+
+    Session-aware and idempotent by trading date, so the job can run on a short
+    interval and decide for itself whether today is already done. That is what
+    makes a retry, a slept machine and a launchd catch-up all converge on
+    exactly one snapshot per symbol per session.
+
+    ``--dry-run`` fetches and derives without writing, which is the honest way
+    to verify the pipeline outside a session: it proves the surface can be
+    built without fabricating a snapshot dated to a day the market never
+    traded.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    provider = build_provider(settings)
+    now = utc_now()
+
+    calendar = get_trading_calendar(settings.market_data.default_exchange)
+    phase = session_phase(calendar, now)
+
+    try:
+        async with session_scope(factory) as session:
+            symbols = list(await WatchlistRepository(session).symbols())
+
+            if not dry_run:
+                if phase is not SessionPhase.REGULAR:
+                    print(f"\nno capture: session is {phase.value}, not REGULAR")
+                    return 0
+                if not within_capture_window(now) and not force:
+                    print(f"\nno capture: {now:%H:%M} UTC is outside the capture window")
+                    return 0
+
+            service = OptionSnapshotService(session, provider)
+            run = await service.capture(symbols, now=now, persist=not dry_run, force=force)
+
+        print(f"\nmode            : {'DRY RUN (nothing written)' if dry_run else 'CAPTURE'}")
+        print(f"session         : {phase.value}")
+        print(f"captured_at     : {run.captured_at.isoformat()}")
+        feed = getattr(provider, "options_feed", "none")
+        print(f"provider / feed : {provider.name} / {feed}")
+        print(
+            f"symbols         : {run.symbols_captured}/{run.symbols_requested} captured, "
+            f"{run.symbols_skipped_existing} already done today"
+        )
+        print(f"contracts       : {run.contracts_scanned:,} scanned, {run.contracts_stored:,} kept")
+        print(f"summaries       : {run.summaries_stored}")
+        print(f"no usable IV    : {run.symbols_without_iv}")
+        print(f"duration        : {run.duration_seconds:.1f}s")
+        print(f"quality         : {run.quality.describe()}")
+        for symbol, error in run.failures[:10]:
+            print(f"  FAILED {symbol}: {error}", file=sys.stderr)
+        return 0 if not run.failures else 1
+    finally:
+        await engine.dispose()
 
 
 async def _market_data_verify_adjustments(settings: Settings, symbols: list[str] | None) -> int:
@@ -1507,6 +1616,16 @@ def _parse_utc(raw: str) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _run_risk(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch the ``risk`` command."""
+    return asyncio.run(_risk(settings, _parse_symbols(args.symbols) or None))
+
+
+def _run_options(settings: Settings, args: argparse.Namespace) -> int:
+    """Dispatch an ``options`` subcommand."""
+    return asyncio.run(_options_capture(settings, dry_run=args.dry_run, force=args.force))
+
+
 def _run_market_data(settings: Settings, args: argparse.Namespace) -> int:
     """Dispatch a ``market-data`` subcommand.
 
@@ -1761,6 +1880,8 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
         _volatility(settings, symbol=args.symbol, preview=args.preview)
     ),
     "market-data": _run_market_data,
+    "options": _run_options,
+    "risk": _run_risk,
     "notifications": _run_notifications,
     "watchlist": _run_watchlist,
     "scanner": _run_scanner,
@@ -1960,6 +2081,36 @@ def _add_research_parsers(sub: argparse._SubParsersAction) -> None:  # type: ign
     )
 
 
+def _add_risk_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Read-only short-horizon risk."""
+    risk = sub.add_parser(
+        "risk", help="Short-horizon expected movement and risk bands (magnitude only)"
+    )
+    risk.add_argument(
+        "symbols", nargs="?", help="Comma-separated tickers; omit for the whole watchlist"
+    )
+
+
+def _add_options_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """The option collector and the read-only risk view.
+
+    Both live here rather than in ``_build_parser`` to keep that function within
+    its statement budget; they are grouped because both are magnitude-only
+    market-data surfaces with no order path.
+    """
+    _add_risk_parser(sub)
+
+    options = sub.add_parser("options", help="Point-in-time option surface snapshots")
+    options_sub = options.add_subparsers(dest="options_command", required=True)
+    capture = options_sub.add_parser("capture", help="Capture today's option surface")
+    capture.add_argument(
+        "--dry-run", action="store_true", help="Fetch and derive without writing anything"
+    )
+    capture.add_argument(
+        "--force", action="store_true", help="Capture even outside the window, replacing today's"
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Every command and its arguments.
 
@@ -2029,6 +2180,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create any missing benchmark instruments (writes to `instruments` only)",
     )
+
+    _add_options_parser(sub)
 
     verifier = market_sub.add_parser(
         "verify-adjustments",

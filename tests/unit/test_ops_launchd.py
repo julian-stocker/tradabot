@@ -44,16 +44,27 @@ def paths(tmp_path: Path) -> dict[str, Path]:
 # ---------------------------------------------------------------------------
 # Cadence
 # ---------------------------------------------------------------------------
-def test_six_jobs_at_the_documented_cadence() -> None:
-    """Phase 5.8.2 added trends and status, both at the scan cadence.
+def test_seven_jobs_at_the_documented_cadence() -> None:
+    """Phase 5.8.2 added trends and status; phase 10.1 added the option collector.
 
-    Neither fetches market data -- they read what sync and scan persisted -- so
-    matching the scan interval costs nothing and keeps observations from ageing
-    before they are mentioned.
+    Neither trends nor status fetches market data -- they read what sync and scan
+    persisted -- so matching the scan interval costs nothing and keeps
+    observations from ageing before they are mentioned. The option collector
+    does fetch, which is why it runs on its own cadence and guards itself on
+    session, window and whether today is already captured.
     """
     jobs = {job.name: job for job in scheduled_jobs()}
 
-    assert set(jobs) == {"sync", "scan", "overview", "summary", "trends", "status"}
+    assert set(jobs) == {
+        "sync",
+        "scan",
+        "overview",
+        "summary",
+        "trends",
+        "status",
+        "options",
+    }
+    assert jobs["options"].interval_seconds == 20 * 60
     assert jobs["sync"].interval_seconds == 5 * 60
     assert jobs["scan"].interval_seconds == 15 * 60
     assert jobs["overview"].interval_seconds == 60 * 60

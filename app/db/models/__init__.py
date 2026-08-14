@@ -8,6 +8,7 @@ from app.db.models.candle import Candle
 from app.db.models.corporate_action import CorporateActionRow
 from app.db.models.instrument import Instrument
 from app.db.models.notification import NotificationAttempt, NotificationState
+from app.db.models.options import OptionQuoteSnapshot, OptionSurfaceSnapshot
 from app.db.models.ownership import ExternalAccountConnection, TradabotUser
 from app.db.models.paper import (
     DecisionOutcome,
@@ -38,6 +39,8 @@ __all__ = [
     "Instrument",
     "NotificationAttempt",
     "NotificationState",
+    "OptionQuoteSnapshot",
+    "OptionSurfaceSnapshot",
     "PortfolioSnapshot",
     "RiskProfile",
     "ScanRun",

@@ -793,10 +793,19 @@ async def test_a_stale_scan_during_the_session_is_degraded(
 # ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
-def test_the_scheduler_gained_exactly_two_jobs() -> None:
+def test_the_scheduler_holds_exactly_the_expected_jobs() -> None:
+    """Phase 5.8.2 added trends and status; phase 10.1 added options capture."""
     jobs = {job.name: job for job in scheduled_jobs()}
 
-    assert set(jobs) == {"sync", "scan", "overview", "summary", "trends", "status"}
+    assert set(jobs) == {
+        "sync",
+        "scan",
+        "overview",
+        "summary",
+        "trends",
+        "status",
+        "options",
+    }
     assert jobs["sync"].interval_seconds == 5 * 60
     assert jobs["scan"].interval_seconds == 15 * 60
     assert jobs["trends"].interval_seconds == 15 * 60

@@ -86,6 +86,15 @@ def _mic_for(exchange: object) -> str | None:
 
 PROVIDER_NAME: Final = "alpaca"
 
+OPTIONS_FEED: Final = "indicative"
+"""The only option feed this account can read; OPRA requires a signed agreement.
+
+Recorded on every stored snapshot. Alpaca documents the indicative feed as a
+derived approximation of quotes rather than the consolidated OPRA best
+bid/offer, so a series that silently mixed the two would carry an unexplained
+step change.
+"""
+
 T = TypeVar("T")
 
 # Alpaca timeframe units are constructed lazily so importing this module does not
@@ -143,11 +152,13 @@ class AlpacaMarketDataProvider:
         *,
         stock_client: Any = None,
         corporate_actions_client: Any = None,
+        option_client: Any = None,
     ) -> None:
         self._settings = settings
         self._market_data = market_data or MarketDataSettings()
         self._stock_client = stock_client
         self._corporate_actions_client = corporate_actions_client
+        self._option_client = option_client
         self._last_success: datetime | None = None
         self._last_error: str | None = None
 
@@ -195,6 +206,64 @@ class AlpacaMarketDataProvider:
                 secret_key=self._settings.api_secret.get_secret_value(),
             )
         return self._corporate_actions_client
+
+    def _options(self) -> Any:
+        if self._option_client is None:
+            self._require_credentials()
+            from alpaca.data.historical.option import OptionHistoricalDataClient
+
+            self._option_client = OptionHistoricalDataClient(
+                api_key=self._settings.api_key.get_secret_value(),
+                secret_key=self._settings.api_secret.get_secret_value(),
+            )
+        return self._option_client
+
+    # -- Options -----------------------------------------------------------
+
+    @property
+    def options_feed(self) -> str:
+        """Which option feed this account actually reads.
+
+        ``indicative`` unless an OPRA agreement is signed. Exposed so every
+        stored snapshot records its provenance: the indicative feed is Alpaca's
+        derived approximation of quotes rather than the consolidated OPRA best
+        bid/offer, and mixing the two in one series without a marker would put
+        an unexplained step change in the middle of it.
+        """
+        return OPTIONS_FEED
+
+    async def get_option_chain(self, symbol: str) -> dict[str, Any]:
+        """Every listed contract for ``symbol``, as provider snapshots.
+
+        Read-only, and deliberately the *data* client: this class never imports
+        an Alpaca trading client, so no order can be placed from here.
+        """
+        from alpaca.data.enums import OptionsFeed
+        from alpaca.data.requests import OptionChainRequest
+
+        client = self._options()
+        request = OptionChainRequest(
+            underlying_symbol=symbol.upper(), feed=OptionsFeed(OPTIONS_FEED)
+        )
+        result = await self._call(lambda: client.get_option_chain(request), "get_option_chain")
+        return dict(result)
+
+    async def get_underlying_price(self, symbol: str) -> tuple[float, datetime | None]:
+        """Latest traded price for the underlying, with its timestamp.
+
+        The timestamp is returned rather than discarded so the caller can refuse
+        a stale spot. Every moneyness and delta in a surface is quoted relative
+        to this number, so a stale one shifts the whole capture silently.
+        """
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        client = self._stock()
+        request = StockLatestTradeRequest(symbol_or_symbols=symbol.upper())
+        result = await self._call(
+            lambda: client.get_stock_latest_trade(request), "get_stock_latest_trade"
+        )
+        trade = result[symbol.upper()]
+        return float(trade.price), getattr(trade, "timestamp", None)
 
     # -- Protocol ----------------------------------------------------------
 

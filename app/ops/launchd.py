@@ -64,8 +64,9 @@ def scheduled_jobs(
     summary_minutes: int = 60,
     trends_minutes: int = 15,
     status_minutes: int = 15,
+    options_minutes: int = 20,
 ) -> tuple[ScheduledJob, ...]:
-    """The six jobs, at the configured cadence.
+    """The seven jobs, at the configured cadence.
 
     The daily summary runs hourly and decides for itself whether the session has
     closed -- see :mod:`app.ops.status`. Pinning it to a wall-clock time would
@@ -114,6 +115,18 @@ def scheduled_jobs(
             args=("scanner", "trends"),
             interval_seconds=trends_minutes * 60,
             description="Descriptive market activity from stored evaluations (no fetch)",
+        ),
+        ScheduledJob(
+            name="options",
+            args=("options", "capture"),
+            interval_seconds=options_minutes * 60,
+            description=(
+                "Capture one point-in-time option surface per regular session. Runs on a "
+                "short interval and decides for itself whether the session is open, whether "
+                "the capture window is current, and whether today is already done -- so a "
+                "retry or a slept machine converges on exactly one snapshot per symbol per "
+                "day. Option chains cannot be backfilled, which is why this exists."
+            ),
         ),
         ScheduledJob(
             name="status",
