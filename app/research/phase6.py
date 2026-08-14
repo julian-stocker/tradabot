@@ -36,8 +36,10 @@ from typing import Any, Final
 
 import polars as pl
 
+from app.market_data.benchmarks import is_benchmark
+from app.research.adjustments import adjust_all, load_splits
 from app.research.episodes import MAX_EPISODE_GAP
-from app.research.featureset import attach_context, per_symbol_features
+from app.research.featureset import attach_context, attach_real_context, per_symbol_features
 
 QUANTILES: Final = 4
 MIN_EPISODES: Final = 30
@@ -483,8 +485,16 @@ def as_dict(result: FeatureResult) -> dict[str, Any]:
     }
 
 
-def load_phase6_dataset(database_url: str, *, run_id: int, horizon: str) -> pl.DataFrame:
+def load_phase6_dataset(
+    database_url: str, *, run_id: int, horizon: str, adjust_splits: bool = True
+) -> pl.DataFrame:
     """Observations joined to causal features and one horizon's outcome.
+
+    ``adjust_splits`` defaults to True and should stay that way. It exists so
+    phase 9A part C can reproduce the contaminated series deliberately and
+    measure what the adjustment moved; setting it False anywhere else
+    reintroduces eleven bars of -75% to -95% "returns" that are share counts
+    changing, not prices.
 
     The join key is the **hourly bar whose close is the evaluation instant**:
     ``candle.timestamp == evaluated_at - 1h``. The replay grid yields bar closes,
@@ -521,6 +531,7 @@ def load_phase6_dataset(database_url: str, *, run_id: int, horizon: str) -> pl.D
                WHERE c.timeframe = 'H1' ORDER BY c.instrument_id, c.timestamp""",
             connection,
         )
+        splits = load_splits(connection)
     finally:
         connection.close()
 
@@ -528,6 +539,13 @@ def load_phase6_dataset(database_url: str, *, run_id: int, horizon: str) -> pl.D
     # sides, so the join key is a real instant rather than two string formats
     # that happen to match today.
     candles = candles.with_columns(pl.col("timestamp").str.to_datetime(strict=False))
+
+    # Before any feature is computed. A split left in the series is a -75% bar
+    # that every rolling window downstream would treat as a price move.
+    candles = candles.sort(["instrument_id", "timestamp"])
+    if adjust_splits:
+        candles = adjust_all(candles, splits)
+
     features = pl.concat(
         [
             per_symbol_features(group.sort("timestamp"))
@@ -537,7 +555,20 @@ def load_phase6_dataset(database_url: str, *, run_id: int, horizon: str) -> pl.D
     features = features.with_columns(
         pl.col("symbol").replace_strict(_sector_map(observations), default=None).alias("sector")
     )
+
+    # Reference instruments are featured like anything else, then held out of
+    # the cross-section: an equal-weight "market" that included SPY would let
+    # the benchmark vote on itself.
+    is_reference = pl.col("symbol").map_elements(is_benchmark, return_dtype=pl.Boolean)
+    benchmarks = features.filter(is_reference)
+    features = features.filter(~is_reference)
+
     features = attach_context(features)
+    return _join_observations(attach_real_context(features, benchmarks), observations)
+
+
+def _join_observations(features: pl.DataFrame, observations: pl.DataFrame) -> pl.DataFrame:
+    """Attach each observation to the hourly bar it actually saw."""
 
     joined = (
         observations.with_columns(

@@ -28,10 +28,32 @@ What is deliberately absent
 * **Time of day on the coarse stream.** Both streams are hourly, so a bucket
   exists -- but the coarse window has no 5m/15m context, so intraday behaviour
   there is not comparable to production. Reported separately, never pooled.
-* **A real index.** The universe is 52 single names with no ETF, so the market
-  proxy is an **equal-weight mean of those same 52 symbols**. That is a
-  defensible large-cap proxy and it is *not* the S&P 500; it is named
-  ``proxy`` everywhere so no reader can mistake one for the other.
+* **A real index.** *(No longer true -- see below.)* Phase 6 ran with a market
+  proxy that was an **equal-weight mean of the same 52 symbols** it was
+  providing context for. It is still computed, still named ``proxy``, and still
+  the basis of every published phase-6 number.
+
+Real context, added alongside
+-----------------------------
+Twelve reference instruments (SPY and QQQ for the market, nine sector funds,
+and SOXX retained as an alternate -- see ``app.market_data.benchmarks``) are now
+stored and featured exactly like any other symbol, and
+:func:`attach_real_context` joins them on as
+``index_*``/``nasdaq_*``/``sector_etf_*`` columns. They are **additive**: proxy columns are
+untouched, so a single row carries both readings and an analysis can ask whether
+they disagree rather than assuming the newer one is better.
+
+The reference instruments are excluded from the proxy cross-section. Leaving SPY
+in an equal-weight mean of its own constituents would let the reference vote on
+itself; ``app.market_data.benchmarks.is_benchmark`` is the filter.
+
+Prices are split-adjusted before any feature is computed
+--------------------------------------------------------
+Phase 6 read the raw candle table, in which eleven splits appear as genuine
+one-bar returns of -75% to -95% -- and ``ret_1d_pct`` is the input to the market
+proxy, so each one moved "the market" too. ``app.research.adjustments`` now
+back-adjusts each series first, and only for splits the price series itself
+corroborates.
 """
 
 from __future__ import annotations
@@ -39,6 +61,12 @@ from __future__ import annotations
 from typing import Final
 
 import polars as pl
+
+from app.market_data.benchmarks import (
+    MARKET_BENCHMARK,
+    SECONDARY_MARKET_BENCHMARK,
+    SECTOR_BENCHMARKS,
+)
 
 BARS_PER_DAY: Final = 7
 """Hourly bars in one US regular session (09:30-16:00 -> 7 partial/whole hours).
@@ -239,6 +267,166 @@ def attach_context(frame: pl.DataFrame) -> pl.DataFrame:
         (pl.col("ret_1d_pct") - pl.col("proxy_ret_1d_pct")).alias("rel_strength_market_pct"),
         (pl.col("proxy_px_vs_ema50_pct") > 0).alias("market_above_ema50"),
     )
+
+
+def attach_real_context(frame: pl.DataFrame, benchmarks: pl.DataFrame) -> pl.DataFrame:
+    """Join real index and sector-ETF context, and derive relative strength.
+
+    The counterpart to :func:`attach_context`, and deliberately additive rather
+    than a replacement: both sets of columns coexist on the same rows so a
+    single analysis can ask whether the proxy and the real reference disagree.
+    Replacing the proxy in place would have made that comparison impossible and
+    silently invalidated every phase-6 number at the same time.
+
+    Args:
+        frame: featured rows for the **tradable universe only**. Benchmarks must
+            already be excluded -- an ETF left in here would be given context
+            about itself.
+        benchmarks: featured rows for the reference instruments, carrying
+            ``symbol``, ``timestamp``, ``ret_1d_pct`` and ``px_vs_ema50_pct``.
+
+    Rows whose reference has no bar at that timestamp keep NULL context. That is
+    an honest gap -- an ETF can halt while its constituents trade -- and a
+    forward fill would invent a reference price nobody could have seen.
+    """
+    joined = frame
+    for benchmark, prefix in (
+        (MARKET_BENCHMARK, "index"),
+        (SECONDARY_MARKET_BENCHMARK, "nasdaq"),
+    ):
+        series = (
+            benchmarks.filter(pl.col("symbol") == benchmark.symbol)
+            .select(
+                "timestamp",
+                pl.col("ret_1d_pct").alias(f"{prefix}_ret_1d_pct"),
+                pl.col("ret_5d_pct").alias(f"{prefix}_ret_5d_pct"),
+                pl.col("px_vs_ema50_pct").alias(f"{prefix}_px_vs_ema50_pct"),
+            )
+            .unique(subset="timestamp", keep="first")
+            .sort("timestamp")
+        )
+        joined = joined.join(series, on="timestamp", how="left")
+
+    joined = joined.with_columns(
+        (pl.col("ret_1d_pct") - pl.col("index_ret_1d_pct")).alias("relative_strength_market_1d"),
+        (pl.col("ret_5d_pct") - pl.col("index_ret_5d_pct")).alias("relative_strength_market_5d"),
+        (pl.col("ret_1d_pct") - pl.col("nasdaq_ret_1d_pct")).alias("relative_strength_nasdaq_1d"),
+        (pl.col("index_px_vs_ema50_pct") > 0).alias("index_above_ema50"),
+    ).with_columns(
+        # A named state as well as the boolean: part L renders words, and
+        # deriving them at the formatter would put the definition in two places.
+        pl.when(pl.col("index_px_vs_ema50_pct").is_null())
+        .then(None)
+        .when(pl.col("index_above_ema50"))
+        .then(pl.lit("UP"))
+        .otherwise(pl.lit("DOWN"))
+        .alias("market_trend_state"),
+    )
+
+    if "sector" not in frame.columns:
+        return joined
+
+    # Key the sector funds by the watchlist tag they stand in for, so the join
+    # is on the same `sector` column the proxy uses and the two are comparable
+    # row for row. `parent` carries the broader context a sector sits inside --
+    # SMH's is XLK -- which is NULL for every sector except semiconductors.
+    tags = pl.DataFrame(
+        {
+            "symbol": [b.symbol for b in SECTOR_BENCHMARKS],
+            "sector": [b.sector for b in SECTOR_BENCHMARKS],
+            "parent_symbol": [b.parent for b in SECTOR_BENCHMARKS],
+        }
+    )
+    # Drop any `sector` the reference rows already carry before joining the tag
+    # table. A benchmark is not on the watchlist, so its own `sector` is NULL --
+    # and letting both columns exist would have polars suffix the tag to
+    # `sector_right`, leaving the join keyed on a column of nulls.
+    reference = benchmarks.drop("sector", strict=False)
+    sectors = (
+        reference.join(tags, on="symbol", how="inner")
+        .select(
+            "timestamp",
+            "sector",
+            "parent_symbol",
+            pl.col("ret_1d_pct").alias("sector_etf_ret_1d_pct"),
+            pl.col("ret_5d_pct").alias("sector_etf_ret_5d_pct"),
+            pl.col("px_vs_ema50_pct").alias("sector_etf_px_vs_ema50_pct"),
+        )
+        .unique(subset=["timestamp", "sector"], keep="first")
+        .sort("timestamp")
+    )
+
+    parents = (
+        reference.select(
+            "timestamp",
+            pl.col("symbol").alias("parent_symbol"),
+            pl.col("ret_1d_pct").alias("parent_etf_ret_1d_pct"),
+        )
+        .unique(subset=["timestamp", "parent_symbol"], keep="first")
+        .sort("timestamp")
+    )
+
+    return (
+        joined.join(sectors, on=["timestamp", "sector"], how="left")
+        .join(parents, on=["timestamp", "parent_symbol"], how="left")
+        .with_columns(
+            (pl.col("ret_1d_pct") - pl.col("sector_etf_ret_1d_pct")).alias(
+                "relative_strength_sector_1d"
+            ),
+            (pl.col("ret_5d_pct") - pl.col("sector_etf_ret_5d_pct")).alias(
+                "relative_strength_sector_5d"
+            ),
+            (pl.col("sector_etf_ret_1d_pct") - pl.col("index_ret_1d_pct")).alias(
+                "sector_relative_to_market"
+            ),
+            (pl.col("sector_etf_px_vs_ema50_pct") > 0).alias("sector_above_ema50"),
+        )
+        .with_columns(
+            pl.when(pl.col("sector_etf_px_vs_ema50_pct").is_null())
+            .then(None)
+            .when(pl.col("sector_above_ema50"))
+            .then(pl.lit("UP"))
+            .otherwise(pl.lit("DOWN"))
+            .alias("sector_trend_state"),
+        )
+    )
+
+
+REAL_CONTEXT_FEATURES: Final[tuple[str, ...]] = (
+    "index_ret_1d_pct",
+    "index_ret_5d_pct",
+    "index_px_vs_ema50_pct",
+    "nasdaq_ret_1d_pct",
+    "nasdaq_ret_5d_pct",
+    "sector_etf_ret_1d_pct",
+    "sector_etf_ret_5d_pct",
+    "parent_etf_ret_1d_pct",
+    "relative_strength_market_1d",
+    "relative_strength_market_5d",
+    "relative_strength_nasdaq_1d",
+    "relative_strength_sector_1d",
+    "relative_strength_sector_5d",
+    "sector_relative_to_market",
+)
+"""Context measured against instruments that are not in the universe.
+
+Named ``index``/``nasdaq``/``sector_etf`` against the proxy's
+``proxy``/``sector`` so no table, log line or column reference can confuse the
+two. The pairings are exact:
+``proxy_ret_1d_pct`` <-> ``index_ret_1d_pct``,
+``rel_strength_market_pct`` <-> ``relative_strength_market_1d``,
+``sector_ret_1d_pct`` <-> ``sector_etf_ret_1d_pct``,
+``rel_strength_sector_pct`` <-> ``relative_strength_sector_1d``.
+
+``parent_etf_ret_1d_pct`` is non-null only for semiconductors, whose sector
+reference (SMH) declares XLK as its parent. Every other sector has no broader
+context, and a NULL says so rather than silently substituting the market.
+"""
+
+REAL_CONTEXT_BOOLEANS: Final[tuple[str, ...]] = ("index_above_ema50", "sector_above_ema50")
+
+REAL_CONTEXT_STATES: Final[tuple[str, ...]] = ("market_trend_state", "sector_trend_state")
+"""Categorical mirrors of the booleans, for rendering rather than analysis."""
 
 
 CONTINUOUS_FEATURES: Final[tuple[str, ...]] = (

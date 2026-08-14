@@ -499,11 +499,27 @@ class MockMarketDataProvider:
             for i in range(lo, hi)
         ]
 
-    async def get_corporate_actions(self, symbol: str) -> list[CorporateAction]:
-        """Deterministic corporate actions, ascending by effective time."""
+    async def get_corporate_actions(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[CorporateAction]:
+        """Deterministic corporate actions, ascending by effective time.
+
+        Honours the window so a test can assert that a caller passed one at all:
+        a mock that ignored the bounds would happily return every action and
+        hide the exact bug that made this parameter necessary.
+        """
         symbol = symbol.upper()
         self._require_known(symbol)
-        return sorted(_CORPORATE_ACTIONS.get(symbol, ()), key=lambda a: a.effective_at)
+        actions = sorted(_CORPORATE_ACTIONS.get(symbol, ()), key=lambda a: a.effective_at)
+        if start is not None:
+            actions = [a for a in actions if a.effective_at >= start]
+        if end is not None:
+            actions = [a for a in actions if a.effective_at <= end]
+        return actions
 
     async def get_historical_candles_batch(
         self,

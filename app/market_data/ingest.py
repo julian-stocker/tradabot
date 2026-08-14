@@ -66,12 +66,22 @@ class IngestionService:
         logger.info("instrument sync complete", provider=self._provider.name, count=count)
         return count
 
-    async def sync_corporate_actions(self, symbol: str) -> int:
+    async def sync_corporate_actions(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> int:
         """Fetch and store corporate actions for one symbol.
 
         Runs before candles in :meth:`sync_all`, so an adjusted series is never
         computed from a partially ingested action set -- which would produce a
         chart that looks continuous and is wrong.
+
+        ``start``/``end`` bound the provider query. Pass the span of the stored
+        price series: providers default to a window of days, and an unbounded
+        call returns almost nothing while looking like a successful sync.
 
         Raises:
             InstrumentNotFoundError: the symbol is not in the database.
@@ -81,7 +91,9 @@ class IngestionService:
         if instrument is None:
             raise InstrumentNotFoundError(symbol)
 
-        actions = await self._provider.get_corporate_actions(instrument.symbol)
+        actions = await self._provider.get_corporate_actions(
+            instrument.symbol, start=start, end=end
+        )
         return await self._actions.upsert_many(instrument_id=instrument.id, actions=actions)
 
     async def sync_candles(

@@ -468,6 +468,16 @@ def _format_trends(event: Event, payload: Mapping[str, Any]) -> tuple[str, str]:
         lines.extend(str(line) for line in volatility.get("lines", []))
         lines.append(str(volatility.get("disclaimer") or ""))
 
+    context = payload.get("market_context")
+    if isinstance(context, dict):
+        # A third distinct claim: not "this moved" and not "this is expected to
+        # move", but "this moved relative to its references". Same treatment for
+        # the same reason -- three blocks a reader can tell apart.
+        lines.append("")
+        lines.append(str(context.get("title") or "MARKET CONTEXT"))
+        lines.extend(str(line) for line in context.get("lines", []))
+        lines.append(str(context.get("disclaimer") or ""))
+
     return title, "\n".join(lines)
 
 

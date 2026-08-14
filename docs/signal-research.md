@@ -20,7 +20,7 @@ problem: the inputs themselves do not separate outcomes.
 | Volatility | ATR, ATR%, ATR percentile, realised vol, range/body vs ATR | 4.0pp | NO_INFORMATION |
 | Volume | relative volume, volume acceleration | 1.4pp | NO_INFORMATION |
 | Structure | breakout/breakdown, distance from 20-bar high/low, price discovery | 1.4pp | NO_INFORMATION |
-| Market context | equal-weight proxy return, breadth, relative strength vs market/sector | 5.5pp | REGIME_DEPENDENT |
+| Market context | equal-weight proxy return, breadth, relative strength vs market/sector | 5.5pp | REGIME_DEPENDENT — **superseded, see phase 9A** |
 | Time of day | opening / early / midday / late | 2.1pp | NO_INFORMATION |
 
 Horizons 1d, 5d and 20d. Streams: production-faithful (2025-02→2026-08, four
@@ -62,6 +62,33 @@ Signal-v1 gives separate weights to momentum, trend and volatility. At r = 0.98
 between RSI and EMA-distance, those are not independent votes — they are one
 measurement counted repeatedly, which is why the aggregate never behaved like a
 diversified score.
+
+## Phase 9A: the market-context row does not survive a real reference
+
+Market context was the only family above the 5pp floor, and it was measured
+against a proxy built from the same 52 symbols it was providing context for.
+Phase 9A added SPY, QQQ and nine sector funds — a reference the universe does
+not appear in — and re-ran the family across 1d/3d/5d/20d.
+
+**111 of 112 analyses returned `NO_INFORMATION`**, and the exception flips sign
+between adjacent horizons on the study's smallest subsample. Proxy and real
+agreed on the verdict in all 32 pairings. Walk-forward by year reversed sign for
+every feature tested. Classification: `NO_ADDITIONAL_INFORMATION`.
+
+The clinching number is redundancy: the new real feature correlates **+0.978**
+with the proxy it replaces, and **+0.906** with the stock's own 1-day return. It
+is the same measurement wearing a third hat — which is the pattern this document
+already described at r = 0.978 between RSI and EMA-distance.
+
+The 5.5pp itself was `proxy_breadth_stacked`, which clears the floor in one of
+four cells and swings from −9.8 to +4.6 across years. Breadth is also the one
+context feature an ETF cannot replace, being inherently cross-sectional.
+
+Separately, phase 9A found the research pipeline had been reading **unadjusted**
+candles: sixteen splits appeared as one-bar returns of −95% to +686%, and
+`atr_pct` was overstated 24× at the tail. This is now fixed. It did **not**
+change any phase-6 verdict — rank-based bucketing absorbed it — but it did
+matter for magnitude features. See [market-context.md](market-context.md).
 
 ## Why no signal-v2 was built
 

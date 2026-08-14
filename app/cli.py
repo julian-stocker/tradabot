@@ -16,10 +16,12 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.errors import InstrumentNotFoundError, ProviderError
 from app.core.events import Event, EventCategory, EventType
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, get_logger
 from app.core.time import utc_now
 from app.corporate_actions.repository import CorporateActionRepository
 from app.db.base import Base
@@ -29,9 +31,17 @@ from app.domain.enums import Horizon, Timeframe
 from app.features.service import FeatureService
 from app.instruments.repository import InstrumentRepository
 from app.instruments.service import InstrumentService
+from app.market_data.benchmarks import (
+    BENCHMARK_TIMEFRAMES,
+    BENCHMARKS,
+    register_benchmarks,
+    watchlisted_benchmarks,
+)
 from app.market_data.calendars import get_trading_calendar
 from app.market_data.import_service import MarketDataImportService
 from app.market_data.ingest import IngestionService
+from app.market_data.integrity import DiscontinuityKind, scan_price_series
+from app.market_data.provider import MarketDataProvider
 from app.market_data.registry import build_provider
 from app.market_data.repository import CandleRepository
 from app.market_data.volatility import MODEL_VERSION, VolatilityRegime
@@ -79,6 +89,8 @@ from app.signals.service import SignalService
 from app.simulation.defaults import build_default_profiles
 from app.simulation.portfolios import PORTFOLIO_KEYS, build_personal_profiles
 from app.simulation.repository import SimulationProfileRepository
+
+logger = get_logger(__name__)
 
 
 async def _seed(settings: Settings, symbols: list[str] | None, days: int) -> int:
@@ -227,6 +239,206 @@ async def _market_data_status(settings: Settings) -> int:
             print("\nAlpaca is selected but has no credentials.")
             print("Set ALPACA_API_KEY and ALPACA_API_SECRET, or use provider=mock.")
             return 1
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _market_data_benchmarks(settings: Settings, *, register: bool) -> int:
+    """Show, or create, the market and sector reference instruments.
+
+    Registration writes to ``instruments`` and, for anything it creates, fetches
+    that instrument's corporate actions immediately. Phase 9B found out why that
+    matters: QQQ and SMH were registered after the one-shot action sync had
+    already run, so SMH sat in the database for a whole phase carrying an
+    unadjusted 2-for-1 split -- a -49% bar in the semiconductor sector reference.
+    Counting stored actions cannot detect that, because ADBE, AMD, BA and BRK.B
+    legitimately have none.
+
+    The check that no benchmark has reached the enabled watchlist runs on both
+    paths, because the invariant that matters -- the scanner universe is
+    untouched -- is worth re-asserting every time someone looks, not only when
+    something is written.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    provider = build_provider(settings)
+    try:
+        async with session_scope(factory) as session:
+            if register:
+                report = await register_benchmarks(session, provider=provider.name)
+                print(f"\n{report.summary()}")
+                if report.registered:
+                    written = await _sync_actions_for(
+                        session, provider, symbols=list(report.registered)
+                    )
+                    print(f"corporate actions fetched for new instruments: {written}")
+
+            instruments = InstrumentRepository(session)
+            candles = CandleRepository(session)
+
+            print(f"\n{'symbol':<8} {'role':<24} {'stored':<8} coverage")
+            print("-" * 74)
+            missing = 0
+            for benchmark in BENCHMARKS:
+                instrument = await instruments.get_by_symbol(benchmark.symbol)
+                # An alternate has no sector by definition, so falling back to
+                # "(whole market)" would label SOXX as the market reference.
+                role = benchmark.sector or (
+                    "(whole market)" if benchmark.is_market else f"({benchmark.role.value.lower()})"
+                )
+                if instrument is None:
+                    missing += 1
+                    print(f"{benchmark.symbol:<8} {role:<24} {'-':<8} not registered")
+                    continue
+                stored = 0
+                for timeframe in BENCHMARK_TIMEFRAMES:
+                    count = await candles.count(instrument_id=instrument.id, timeframe=timeframe)
+                    if count == 0:
+                        continue
+                    stored += count
+                    first = await candles.earliest_timestamp(
+                        instrument_id=instrument.id, timeframe=timeframe
+                    )
+                    last = await candles.latest_timestamp(
+                        instrument_id=instrument.id, timeframe=timeframe
+                    )
+                    assert first is not None
+                    assert last is not None
+                    span = f"{first:%Y-%m-%d} -> {last:%Y-%m-%d}"
+                    print(
+                        f"{benchmark.symbol:<8} {role:<24} {timeframe.value:<8} {count:>9,}  {span}"
+                    )
+                if stored == 0:
+                    print(f"{benchmark.symbol:<8} {role:<24} {'-':<8} registered, no bars")
+
+            leaked = await watchlisted_benchmarks(session)
+
+        print("-" * 74)
+        if leaked:
+            print(f"\nWATCHLIST LEAK: {', '.join(leaked)} are enabled for scanning.")
+            print("Benchmarks are context, not candidates. Disable them before scanning again.")
+            return 1
+        print("scanner universe: unaffected (no benchmark is on the enabled watchlist)")
+        if missing:
+            print(f"\n{missing} not registered. Create them with:")
+            print("  tradabot market-data benchmarks --register")
+            return 1
+        return 0
+    finally:
+        await engine.dispose()
+
+
+async def _sync_actions_for(
+    session: AsyncSession,
+    provider: MarketDataProvider,
+    *,
+    symbols: list[str],
+) -> int:
+    """Fetch corporate actions for ``symbols`` over the full stored candle span.
+
+    One implementation, two callers: the bulk command and benchmark
+    registration. Duplicating the window arithmetic is exactly how the two
+    drifted apart in phase 9A, leaving newly registered instruments unfetched.
+
+    Provider failures are contained per symbol -- one unknown ticker must not
+    abandon the rest -- and counted by the caller through the returned total.
+    """
+    oldest = (
+        await session.execute(select(Candle.timestamp).order_by(Candle.timestamp).limit(1))
+    ).scalar_one_or_none()
+    start = (oldest or utc_now()) - timedelta(days=1)
+    end = utc_now() + timedelta(days=1)
+
+    service = IngestionService(session, provider)
+    written = 0
+    for symbol in symbols:
+        try:
+            written += await service.sync_corporate_actions(symbol, start=start, end=end)
+        except (ProviderError, InstrumentNotFoundError) as exc:
+            logger.warning("corporate action sync failed", symbol=symbol, error=str(exc))
+    return written
+
+
+async def _market_data_verify_adjustments(settings: Settings, symbols: list[str] | None) -> int:
+    """Report price discontinuities the stored corporate actions do not explain.
+
+    The check that would have caught SMH. Counting stored actions could not:
+    ADBE, AMD, BA and BRK.B legitimately have none, so "zero actions" carries no
+    information. Only the prices can say whether a 50% overnight move had a
+    reason, and this asks them.
+
+    Exits non-zero on UNEXPLAINED or CONTRADICTED findings so a scheduled job or
+    CI step can gate on it. MARKET_GAP findings are printed but never fail the
+    run -- a real 20% move is the data working, and treating it as a fault is
+    how someone ends up suppressing genuine market behaviour.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with session_scope(factory) as session:
+            report = await scan_price_series(session, symbols=symbols or None)
+
+        print(f"\nscanned {report.instruments_scanned} instruments, {report.bars_scanned:,} bars")
+
+        for kind in (
+            DiscontinuityKind.UNEXPLAINED,
+            DiscontinuityKind.CONTRADICTED,
+            DiscontinuityKind.EXPLAINED,
+            DiscontinuityKind.MARKET_GAP,
+        ):
+            findings = report.of(kind)
+            print(f"\n{kind.value}: {len(findings)}")
+            for finding in findings[:40]:
+                print(f"  {finding.describe()}")
+            if len(findings) > 40:  # noqa: PLR2004
+                print(f"  ... and {len(findings) - 40} more")
+
+        if report.healthy:
+            print("\nEvery split-shaped discontinuity has a corroborating corporate action.")
+            return 0
+        print("\nUnexplained or contradicted discontinuities found.")
+        print("Fetch actions with: tradabot market-data corporate-actions <symbols>")
+        return 1
+    finally:
+        await engine.dispose()
+
+
+async def _market_data_corporate_actions(settings: Settings, symbols: list[str] | None) -> int:
+    """Fetch and store corporate actions for every stored instrument.
+
+    The gap this closes: ``IngestionService.sync_all`` fetches actions, but the
+    two paths that actually built this database -- ``history`` (backfill) and
+    ``scanner sync`` -- both go through ``MarketDataImportService``, which does
+    not. So the candle table grew to millions of raw bars against two stored
+    dividends and no splits at all, and every consumer that reads candles
+    without the adjustment layer saw AAPL fall 74% on 2020-08-31.
+
+    The query window is the span of stored candles, widened by a day at each
+    end. Alpaca's endpoint defaults to about the current month, so an unbounded
+    call returns almost nothing and reports success -- which is how this
+    database reached 2.8 million bars holding two dividends and no splits.
+
+    Idempotent, and safe to re-run: actions upsert on their natural key.
+    """
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    provider = build_provider(settings)
+    try:
+        async with session_scope(factory) as session:
+            instruments = InstrumentRepository(session)
+            targets = (
+                symbols
+                if symbols
+                else [i.symbol for i in await instruments.list_all(active_only=False, limit=1000)]
+            )
+
+            written = await _sync_actions_for(session, provider, symbols=targets)
+
+        print(f"\nsymbols queried : {len(targets)}")
+        print(f"actions written : {written}")
+        print("\nSplits are applied on read, never written back into `candles`.")
+        print("Re-run after adding instruments, or use `verify-adjustments` to check.")
         return 0
     finally:
         await engine.dispose()
@@ -1298,27 +1510,31 @@ def _parse_utc(raw: str) -> datetime:
 def _run_market_data(settings: Settings, args: argparse.Namespace) -> int:
     """Dispatch a ``market-data`` subcommand.
 
-    ``quote`` is the final branch rather than one more ``if`` because the
-    subparser is declared ``required=True``: argparse has already rejected every
-    other value, so a fallback arm here would be unreachable code pretending to
-    be defensive.
+    A dispatch table rather than a chain of ``if``s: the subparser is declared
+    ``required=True``, so argparse has already rejected every value not listed
+    here and a fallback arm would be unreachable code pretending to be
+    defensive. Each entry is a thunk so only the selected coroutine is built.
     """
-    command = args.market_command
-    if command == "status":
-        return asyncio.run(_market_data_status(settings))
-    if command == "import":
-        return asyncio.run(
-            _market_data_import(
-                settings,
-                _parse_symbols(args.symbols),
-                _parse_utc(args.start),
-                _parse_utc(args.end),
-                Timeframe(args.timeframe),
-            )
-        )
-    if command == "sync":
-        return asyncio.run(_market_data_sync(settings, _parse_symbols(args.symbols) or None))
-    return asyncio.run(_market_data_quote(settings, args.symbol.upper()))
+    routes: dict[str, Callable[[], Any]] = {
+        "status": lambda: _market_data_status(settings),
+        "benchmarks": lambda: _market_data_benchmarks(settings, register=args.register),
+        "verify-adjustments": lambda: _market_data_verify_adjustments(
+            settings, _parse_symbols(args.symbols) or None
+        ),
+        "corporate-actions": lambda: _market_data_corporate_actions(
+            settings, _parse_symbols(args.symbols) or None
+        ),
+        "import": lambda: _market_data_import(
+            settings,
+            _parse_symbols(args.symbols),
+            _parse_utc(args.start),
+            _parse_utc(args.end),
+            Timeframe(args.timeframe),
+        ),
+        "sync": lambda: _market_data_sync(settings, _parse_symbols(args.symbols) or None),
+        "quote": lambda: _market_data_quote(settings, args.symbol.upper()),
+    }
+    return int(asyncio.run(routes[args.market_command]()))
 
 
 def _run_portfolios(settings: Settings, args: argparse.Namespace) -> int:
@@ -1804,6 +2020,30 @@ def _build_parser() -> argparse.ArgumentParser:
     market = sub.add_parser("market-data", help="Market-data provider operations")
     market_sub = market.add_subparsers(dest="market_command", required=True)
     market_sub.add_parser("status", help="Show provider configuration and data freshness")
+
+    benchmarks = market_sub.add_parser(
+        "benchmarks", help="Market and sector reference instruments (never watchlisted)"
+    )
+    benchmarks.add_argument(
+        "--register",
+        action="store_true",
+        help="Create any missing benchmark instruments (writes to `instruments` only)",
+    )
+
+    verifier = market_sub.add_parser(
+        "verify-adjustments",
+        help="Report price jumps the stored corporate actions do not explain",
+    )
+    verifier.add_argument(
+        "symbols", nargs="?", help="Comma-separated tickers; omit to scan every instrument"
+    )
+
+    actions = market_sub.add_parser(
+        "corporate-actions", help="Fetch splits and dividends used to adjust prices on read"
+    )
+    actions.add_argument(
+        "symbols", nargs="?", help="Comma-separated tickers; omit for every stored instrument"
+    )
 
     importer = market_sub.add_parser("import", help="Import an explicit historical window")
     importer.add_argument("symbols", help="Comma-separated tickers")

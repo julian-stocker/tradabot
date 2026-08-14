@@ -221,15 +221,26 @@ class MarketDataProvider(Protocol):
         """
         ...
 
-    async def get_corporate_actions(self, symbol: str) -> list[CorporateAction]:
-        """Every known corporate action for ``symbol``, ascending by effective time.
+    async def get_corporate_actions(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[CorporateAction]:
+        """Corporate actions for ``symbol`` in ``[start, end]``, ascending by effective time.
+
+        The window is not decoration. Providers answer corporate-action queries
+        over a **default range measured in days**, so omitting it returns
+        approximately nothing and looks identical to "this instrument never
+        split". Callers adjusting a price series must pass the span of that
+        series; ingestion warns when a provider returns no actions at all.
 
         Returning an empty list is a valid answer meaning "this provider supplies
         no corporate-action data". It is **not** the same as "this instrument had
-        none", and the two are indistinguishable to a caller -- which is exactly
-        why ingestion logs a warning when a provider never returns any. Silently
-        adjusting prices with an incomplete action set produces a series that
-        looks continuous and is wrong.
+        none", and the two are indistinguishable to a caller. Silently adjusting
+        prices with an incomplete action set produces a series that looks
+        continuous and is wrong.
 
         Raises:
             ProviderError: the symbol is unknown or the request failed.

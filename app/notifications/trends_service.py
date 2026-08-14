@@ -36,8 +36,8 @@ from app.core.time import utc_now
 from app.db.session import session_scope
 from app.domain.enums import Timeframe
 from app.instruments.repository import InstrumentRepository
+from app.market_data.adjusted import AdjustedCandleReader
 from app.market_data.calendars import get_trading_calendar
-from app.market_data.repository import CandleRepository
 from app.market_data.volatility import VolatilityRegime
 from app.market_data.volatility_service import VolatilityService
 from app.notifications.feeds import TRENDS_ROUTING_KEY
@@ -243,14 +243,16 @@ class TrendsService:
             return [], len(evaluations), f"last scan was {_hours(now - newest)} ago"
 
         instruments = InstrumentRepository(session)
-        candles = CandleRepository(session)
+        candles = AdjustedCandleReader(session)
         found: list[TrendSignal] = []
 
         for row in evaluations:
             instrument = await instruments.get_by_id(row.instrument_id)
             if instrument is None:  # pragma: no cover -- FK guarantees this
                 continue
-            change_1d, change_5d = await _changes(candles, instrument_id=row.instrument_id)
+            change_1d, change_5d = await _changes(
+                candles, instrument_id=row.instrument_id, symbol=instrument.symbol
+            )
             found.extend(
                 detect(
                     symbol=instrument.symbol,
@@ -346,9 +348,14 @@ class TrendsService:
 
 
 async def _changes(
-    candles: CandleRepository, *, instrument_id: int
+    candles: AdjustedCandleReader, *, instrument_id: int, symbol: str
 ) -> tuple[float | None, float | None]:
     """1-day and 5-day percentage change from stored daily bars.
+
+    **Split-adjusted.** Phase 9B found this path reading raw closes, which meant
+    a 4-for-1 split would have posted "NVDA -75%" to #market-trends as a mover:
+    the largest number in the channel, describing an event that never happened.
+    The adjustment is applied on read; stored candles stay raw.
 
     ``as_of`` is deliberately **not** passed. That filter exists to keep research
     honest by excluding bars that had not closed yet, and here the still-forming
@@ -356,9 +363,13 @@ async def _changes(
     the bar in progress. Nothing computed here reaches a research dataset.
     """
     try:
-        bars = await candles.get_latest(
-            instrument_id=instrument_id, timeframe=Timeframe.D1, limit=CHANGE_LOOKBACK
+        series = await candles.latest(
+            instrument_id=instrument_id,
+            symbol=symbol,
+            timeframe=Timeframe.D1,
+            limit=CHANGE_LOOKBACK,
         )
+        bars = series.bars
     # Missing history is normal for a newly added symbol, not an error.
     except Exception as exc:  # pragma: no cover -- defensive
         logger.debug("no daily candles for trend change", error=safe_message(exc))

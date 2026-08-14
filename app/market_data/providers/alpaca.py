@@ -373,8 +373,14 @@ class AlpacaMarketDataProvider:
             raise ProviderError(msg)
         return normalise_quote(raw, symbol=symbol)
 
-    async def get_corporate_actions(self, symbol: str) -> list[CorporateAction]:
-        """Splits and cash dividends for ``symbol``.
+    async def get_corporate_actions(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[CorporateAction]:
+        """Splits and cash dividends for ``symbol`` in ``[start, end]``.
 
         Alpaca exposes typed corporate actions -- ``ForwardSplit``,
         ``ReverseSplit``, ``CashDividend`` -- which map cleanly onto tradabot's
@@ -382,9 +388,15 @@ class AlpacaMarketDataProvider:
         (mergers, spin-offs, name changes) are **skipped rather than stored**:
         recording an action the adjustment layer ignores would produce a series
         that looks handled and is not.
+
+        **The window matters more than it looks.** Alpaca's corporate-actions
+        endpoint defaults to roughly the current month, so calling this without
+        dates returned one action across 62 instruments -- indistinguishable from
+        a universe in which nobody ever split. Every historical split this
+        database needs sits years before that default.
         """
         symbol = symbol.upper()
-        request = self._corporate_actions_request(symbol)
+        request = self._corporate_actions_request(symbol, start=start, end=end)
         client = self._corporate_actions()
         response = await self._call(
             lambda: client.get_corporate_actions(request), "get_corporate_actions"
@@ -436,9 +448,21 @@ class AlpacaMarketDataProvider:
 
         return StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed(self._settings.feed))
 
-    def _corporate_actions_request(self, symbol: str) -> Any:
+    def _corporate_actions_request(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Any:
         from alpaca.data.enums import CorporateActionsType
         from alpaca.data.requests import CorporateActionsRequest
+
+        # The SDK wants plain dates here, and rejects `None` for one bound while
+        # the other is set -- so both are passed or neither is.
+        window: dict[str, Any] = {}
+        if start is not None and end is not None:
+            window = {"start": start.date(), "end": end.date()}
 
         return CorporateActionsRequest(
             symbols=[symbol],
@@ -447,6 +471,7 @@ class AlpacaMarketDataProvider:
                 CorporateActionsType.REVERSE_SPLIT,
                 CorporateActionsType.CASH_DIVIDEND,
             ],
+            **window,
         )
 
     # -- Transport ---------------------------------------------------------

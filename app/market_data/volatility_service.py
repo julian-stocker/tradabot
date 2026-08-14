@@ -28,7 +28,7 @@ from app.core.logging import get_logger
 from app.core.redaction import safe_message
 from app.core.time import utc_now
 from app.instruments.repository import InstrumentRepository
-from app.market_data.repository import CandleRepository
+from app.market_data.adjusted import AdjustedCandleReader
 from app.market_data.volatility import (
     MODEL_VERSION,
     PRIMARY_TIMEFRAME,
@@ -99,7 +99,7 @@ class VolatilityService:
         """
         moment = now or utc_now()
         instruments = InstrumentRepository(self._session)
-        candles = CandleRepository(self._session)
+        candles = AdjustedCandleReader(self._session)
 
         estimates: list[ExpectedMovement] = []
         failed = 0
@@ -110,11 +110,18 @@ class VolatilityService:
                 if instrument is None:
                     failed += 1
                     continue
-                bars = await candles.get_latest(
+                # Split-adjusted, not raw. A split inside the trailing window
+                # makes one true range enormous -- a 4-for-1 turns a 2% session
+                # into a 75% one -- and ATR% is the sole input to the regime, so
+                # the symbol would read EXTREME_VOL for the ~36 sessions the
+                # window keeps it. Phase 9B found this path reading raw bars.
+                series = await candles.latest(
                     instrument_id=instrument.id,
+                    symbol=symbol,
                     timeframe=PRIMARY_TIMEFRAME,
                     limit=REQUIRED_BARS,
                 )
+                bars = series.bars
                 if not bars:
                     failed += 1
                     continue
