@@ -15,6 +15,7 @@ venv/
 .coverage
 coverage.xml
 htmlcov/
+reports/
 
 # Environment / secrets
 .env

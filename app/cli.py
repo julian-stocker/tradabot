@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -18,6 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.advisor import AdvisorService, FactStore, PriceSeries
+from app.advisor.cli import render, to_json
 from app.core.config import Settings, get_settings
 from app.core.errors import InstrumentNotFoundError, ProviderError
 from app.core.events import Event, EventCategory, EventType
@@ -76,7 +80,11 @@ from app.ownership.service import ensure_local_ownership
 from app.paper.demo import run_demo
 from app.paper.performance import PerformanceSummary
 from app.paper.replay import REPLAY_DISCLAIMER, ReplayError, replay_symbol
+from app.portfolio_fit import Portfolio, PortfolioFitService, Position
+from app.portfolio_fit.cli import render as render_fit
+from app.portfolio_fit.cli import to_json as fit_to_json
 from app.research import cli as research_cli
+from app.research.phase12 import load_daily
 from app.scanner.demo import DemoResult, phase_boundaries, seed_demo_instrument
 from app.scanner.enums import SessionPhase
 from app.scanner.repository import (
@@ -1856,7 +1864,110 @@ def _run_research(settings: Settings, args: argparse.Namespace) -> int:
     )
 
 
+def _portfolio_fit(settings: Settings, args: argparse.Namespace) -> int:
+    """Describe a portfolio, and optionally a hypothetical addition. Read-only."""
+    holdings: list[tuple[str, float]] = []
+    cash = float(args.cash)
+    for item in args.holding or []:
+        try:
+            symbol, quantity = item.split(":", maxsplit=1)
+        except ValueError:
+            print(f"holding must look like SYMBOL:QTY, got {item!r}", file=sys.stderr)
+            return 2
+        holdings.append((symbol.upper(), float(quantity)))
+    prices = _advisor_prices(
+        settings,
+        [s for s, _q in holdings] + ([args.candidate.upper()] if args.candidate else [])
+        + ["SPY"],
+    )
+    as_of = args.as_of or max(
+        (max(v.closes) for v in prices.values() if v.closes), default=None
+    )
+    if as_of is None:
+        print("DATA NOT SYNCED: no local price history", file=sys.stderr)
+        return 2
+    positions: list[Position] = []
+    for symbol, quantity in holdings:
+        series = prices.get(symbol)
+        if series is None or not series.closes:
+            print(f"DATA NOT SYNCED: no price history for {symbol}", file=sys.stderr)
+            return 2
+        days = [d for d in series.closes if d <= as_of]
+        positions.append(Position(symbol, quantity, series.closes[max(days)]))
+    sectors = _advisor_sectors()
+    service = PortfolioFitService(
+        {k: v.closes for k, v in prices.items()}, sectors
+    )
+    report = service.analyse(
+        Portfolio(args.portfolio, cash, tuple(positions), as_of),
+        as_of=as_of,
+        candidate=args.candidate,
+        amount=args.amount,
+    )
+    print(fit_to_json(report) if args.json else render_fit(report))
+    return 0
+
+
+def _advisor_sectors() -> dict[str, str]:
+    """Sector labels from the watchlist. Proxy-derived, surfaced as such."""
+    settings = get_settings()
+    url = settings.database_url
+    path = url.rsplit("/", maxsplit=1)[-1] if "/" in url else url
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT i.symbol, w.tags FROM watchlist w "
+            "JOIN instruments i ON i.id = w.instrument_id WHERE w.enabled = 1"
+        ).fetchall()
+    finally:
+        connection.close()
+    out: dict[str, str] = {}
+    for symbol, tags in rows:
+        if tags:
+            out[str(symbol)] = str(json.loads(tags)[0])
+    return out
+
+
+def _advisor(settings: Settings, args: argparse.Namespace) -> int:
+    """Print a factual, read-only company report. Never a recommendation."""
+    store_path = Path(args.facts)
+    if not store_path.exists():
+        print(f"DATA NOT SYNCED: no fact store at {store_path}", file=sys.stderr)
+        print("The Advisor reads persisted SEC facts; it does not fetch on demand.",
+              file=sys.stderr)
+        return 2
+    facts = FactStore.from_parquet(store_path)
+    prices = _advisor_prices(settings, [args.symbol.upper(), "SPY"])
+    service = AdvisorService(facts, prices)
+    report = service.analyse(args.symbol, as_of=args.as_of)
+    print(to_json(report) if args.json else render(report, provenance=args.provenance))
+    return 0
+
+
+def _advisor_prices(settings: Settings, symbols: list[str]) -> dict[str, Any]:
+    """Split-adjusted closes for the Advisor, read from the local database."""
+    url = settings.database_url
+    path = url.rsplit("/", maxsplit=1)[-1] if "/" in url else url
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        candles, _sectors = load_daily(connection)
+    finally:
+        connection.close()
+    wanted = set(symbols)
+    out: dict[str, Any] = {}
+    for (symbol,), group in candles.group_by("symbol", maintain_order=True):
+        name = str(symbol)
+        if name not in wanted:
+            continue
+        out[name] = PriceSeries(
+            {str(r["timestamp"])[:10]: float(r["close"]) for r in group.iter_rows(named=True)}
+        )
+    return out
+
+
 _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
+    "advisor": _advisor,
+    "portfolio-fit": _portfolio_fit,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
     ),
@@ -1896,6 +2007,31 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
 
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Portfolio and operations commands."""
+    advisor = sub.add_parser(
+        "advisor", help="Factual read-only company report (never a recommendation)"
+    )
+    advisor.add_argument("symbol", help="Ticker to analyse")
+    advisor.add_argument("--as-of", dest="as_of", default=None,
+                         help="Analyse as of a past date (YYYY-MM-DD), point-in-time")
+    advisor.add_argument("--json", action="store_true", help="Emit structured JSON")
+    advisor.add_argument("--provenance", action="store_true",
+                         help="Show the SEC concept, filing and accession behind each figure")
+    advisor.add_argument("--facts", default="reports/phase12_22/fundamental_observations.parquet",
+                         help="Path to the persisted point-in-time SEC fact store")
+
+    fit = sub.add_parser(
+        "portfolio-fit", help="Describe how a candidate fits a portfolio (read-only)"
+    )
+    fit.add_argument("portfolio", help="Name for the portfolio being described")
+    fit.add_argument("--cash", type=float, default=0.0, help="Cash held")
+    fit.add_argument("--holding", action="append",
+                     help="Position as SYMBOL:QTY, repeatable")
+    fit.add_argument("--candidate", default=None, help="Hypothetical candidate symbol")
+    fit.add_argument("--amount", type=float, default=None,
+                     help="Hypothetical cash amount to allocate to the candidate")
+    fit.add_argument("--as-of", dest="as_of", default=None, help="Analyse as of a date")
+    fit.add_argument("--json", action="store_true", help="Emit structured JSON")
+
     portfolios = sub.add_parser("portfolios", help="Personal paper portfolios")
     portfolios_sub = portfolios.add_subparsers(dest="portfolios_command", required=True)
     portfolios_sub.add_parser("seed", help="Install the three personal portfolios")
