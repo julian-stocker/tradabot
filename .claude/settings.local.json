@@ -403,7 +403,23 @@
       "Bash(.venv/bin/mypy --strict app/broker/paper_accounts.py)",
       "Bash(.venv/bin/mypy --strict app/notifications/paper_events.py)",
       "Bash(.venv/bin/mypy --strict app/notifications/)",
-      "Bash(awk '{print \"env mtime:\",$6,$7,$8}')"
+      "Bash(awk '{print \"env mtime:\",$6,$7,$8}')",
+      "Bash(.venv/bin/mypy --strict app/broker/paper_orders.py)",
+      "Bash(pmset -g custom)",
+      "Bash(pmset -g batt)",
+      "Bash(pmset -g assertions)",
+      "Bash(launchctl print *)",
+      "Bash(.venv/bin/mypy --strict app/strategy/)",
+      "Bash(.venv/bin/mypy --strict app/db/models/)",
+      "Bash(.venv/bin/mypy --strict app/paper/fanout.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/forward_repository.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/execution_window.py)",
+      "Bash(.venv/bin/mypy --strict app/core/webhooks.py)",
+      "Bash(.venv/bin/mypy --strict app/paper/lifecycle.py)",
+      "Bash(.venv/bin/mypy --strict app/core/config.py)",
+      "Bash(launchctl kickstart *)",
+      "Bash(.venv/bin/mypy --strict app/paper/forward_service.py)",
+      "Bash(.venv/bin/mypy --strict app/broker/)"
     ]
   }
 }

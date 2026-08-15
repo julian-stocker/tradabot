@@ -1,0 +1,1 @@
+"""Frozen production strategy definitions."""

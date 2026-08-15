@@ -14,11 +14,13 @@ Nested settings use the ``__`` delimiter, e.g.::
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Sequence
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -328,6 +330,33 @@ class ScannerSettings(BaseModel):
     )
 
 
+def _flat_env_value(name: str) -> str | None:
+    """Read one flat variable from the environment, then from ``.env``.
+
+    pydantic-settings reads the dotenv file itself and does not export it, so a
+    flat name present only in ``.env`` is invisible to ``os.environ``.
+    """
+    direct = os.environ.get(name)
+    if direct:
+        return direct
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        # Never read the developer's real `.env` from inside a test. Doing so
+        # made the suite non-hermetic the moment this fallback was added --
+        # tests that construct DiscordSettings with no webhooks silently picked
+        # up production ones, and a real webhook URL could have reached a test
+        # snapshot. Tests supply configuration explicitly or via monkeypatched
+        # environment variables, both of which are read above.
+        return None
+    dotenv = Path(".env")
+    if not dotenv.exists():
+        return None
+    for raw in dotenv.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith(f"{name}="):
+            return line.partition("=")[2].strip().strip('"').strip("'") or None
+    return None
+
+
 class DiscordSettings(BaseModel):
     """Discord webhook delivery.
 
@@ -430,6 +459,27 @@ class DiscordSettings(BaseModel):
         """
         if not isinstance(values, dict):
             return values
+
+        # Flat DISCORD_* names are folded in FIRST, before routing keys are
+        # derived. Two `mode="before"` validators would run bottom-up, so the
+        # routing map was being built from webhooks that had not yet been
+        # resolved -- which is why the status job kept reporting "not delivered"
+        # with DISCORD_STATUS_WEBHOOK plainly set. One validator, no ordering.
+        _flat = {
+            "market_webhook": "DISCORD_MARKET_WEBHOOK",
+            "trends_webhook": "DISCORD_TRENDS_WEBHOOK",
+            "watch_webhook": "DISCORD_MARKET_WATCH_WEBHOOK",
+            "buy_webhook": "DISCORD_MARKET_BUY_WEBHOOK",
+            "sell_exit_webhook": "DISCORD_MARKET_SELL_WEBHOOK",
+            "performance_webhook": "DISCORD_PERFORMANCE_WEBHOOK",
+            "system_webhook": "DISCORD_SYSTEM_WEBHOOK",
+            "status_webhook": "DISCORD_STATUS_WEBHOOK",
+        }
+        for field, variable in _flat.items():
+            if not values.get(field):
+                fallback = _flat_env_value(variable)
+                if fallback:
+                    values[field] = fallback
 
         collected: dict[str, Any] = dict(values.get("portfolio_webhooks") or {})
         for key in list(values):

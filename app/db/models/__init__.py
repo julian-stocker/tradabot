@@ -18,6 +18,12 @@ from app.db.models.paper import (
     VirtualPosition,
     VirtualTrade,
 )
+from app.db.models.paper_forward import (
+    PaperAccountDecision,
+    PaperBrokerOrder,
+    StrategyCandidate,
+    StrategyEvaluation,
+)
 from app.db.models.research import BacktestRun, SignalOutcome, TradeOutcome
 from app.db.models.scanner import (
     ScanRun,
@@ -41,6 +47,8 @@ __all__ = [
     "NotificationState",
     "OptionQuoteSnapshot",
     "OptionSurfaceSnapshot",
+    "PaperAccountDecision",
+    "PaperBrokerOrder",
     "PortfolioSnapshot",
     "RiskProfile",
     "ScanRun",
@@ -48,6 +56,8 @@ __all__ = [
     "SignalOutcome",
     "SignalRow",
     "SimulationProfile",
+    "StrategyCandidate",
+    "StrategyEvaluation",
     "TrackedSignal",
     "TradabotUser",
     "TradeDecisionRow",
