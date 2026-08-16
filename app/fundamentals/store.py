@@ -27,6 +27,7 @@ waiting for an answer.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -228,3 +229,45 @@ def health(
         detail=detail,
         notes=tuple(notes),
     )
+
+
+def latest_filings(
+    path: str | Path = DEFAULT_STORE,
+    *,
+    symbols: Sequence[str] | None = None,
+    as_of: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """The most recent filing known for each symbol, by filing date.
+
+    Point-in-time: ``as_of`` bounds the result to filings visible on that date,
+    so a historical replay cannot see a document that had not been filed yet.
+
+    Returns:
+        ``{symbol: {"accession", "form", "filed", "accepted"}}``. Symbols with no
+        visible filing are absent rather than present with nulls.
+    """
+    target = Path(path)
+    if not target.exists():
+        return {}
+    columns = ["symbol", "accession", "form", "filed"]
+    frame = pl.read_parquet(target)
+    if "accepted" in frame.columns:
+        columns.append("accepted")
+    frame = frame.select(columns).drop_nulls(["filed", "accession"])
+    if symbols is not None:
+        frame = frame.filter(pl.col("symbol").is_in(list(symbols)))
+    if as_of is not None:
+        frame = frame.filter(pl.col("filed") <= as_of)
+    if frame.height == 0:
+        return {}
+    # Sorting by filing date then accession makes the winner deterministic when
+    # a company files several documents on one day.
+    newest = (
+        frame.sort(["symbol", "filed", "accession"])
+        .group_by("symbol", maintain_order=True)
+        .last()
+    )
+    return {
+        str(row["symbol"]): {k: row.get(k) for k in columns if k != "symbol"}
+        for row in newest.iter_rows(named=True)
+    }

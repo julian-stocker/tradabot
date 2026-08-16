@@ -29,6 +29,19 @@ from app.portfolio_fit.context import UNAVAILABLE, CompanyContext
 
 logger = get_logger(__name__)
 
+_WATCHED_METRICS: tuple[str, ...] = (
+    "revenue_ttm",
+    "eps_ttm",
+    "operating_income_ttm",
+    "gross_margin",
+    "operating_margin",
+    "free_cash_flow",
+    "market_cap",
+    "ps_ttm",
+)
+"""Figures a consumer may reasonably watch for change. Copied off the report,
+never recomputed."""
+
 
 class AdvisorCompanyContext:
     """A :class:`~app.portfolio_fit.context.CompanyContextProvider` over the Advisor.
@@ -78,6 +91,13 @@ def _pack(symbol: str, report: AdvisorReport) -> CompanyContext:
         for name, value in section.labels.items():
             labels[name] = value
 
+    metrics: dict[str, float | None] = {}
+    for section in (*report.company_quality, report.valuation):
+        for name in _WATCHED_METRICS:
+            metric = section.metrics.get(name)
+            if metric is not None and metric.available:
+                metrics[name] = metric.value
+
     valuation = report.valuation
     ps_context = valuation.labels.get("ps_context")
     ps = valuation.metrics.get("ps_ttm")
@@ -92,6 +112,7 @@ def _pack(symbol: str, report: AdvisorReport) -> CompanyContext:
         valuation_value=ps.value if ps is not None else None,
         market_position=_market_line(report.market_position),
         labels=labels,
+        metrics=metrics,
         confidence=str(confidence),
     )
 

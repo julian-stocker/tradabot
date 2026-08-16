@@ -52,6 +52,12 @@ class CompanyContext:
     valuation_value: float | None = None
     market_position: str | None = None
     labels: dict[str, str] = field(default_factory=dict)
+    metrics: dict[str, float | None] = field(default_factory=dict)
+    """Selected figures the Advisor already computed, carried verbatim.
+
+    Present so a consumer watching for change has numbers to compare without
+    re-deriving one of them. Nothing is added to this dictionary that the
+    Advisor did not produce."""
     confidence: str = "INSUFFICIENT"
     unavailable_reason: str | None = None
 
@@ -69,6 +75,7 @@ class CompanyContext:
             "valuation_value": self.valuation_value,
             "market_position": self.market_position,
             "labels": dict(self.labels),
+            "metrics": dict(self.metrics),
             "confidence": self.confidence,
             "unavailable_reason": self.unavailable_reason,
         }

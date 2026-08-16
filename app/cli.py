@@ -9,10 +9,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1961,6 +1962,490 @@ def _advisor_context(facts_path: Path, prices: dict[str, Any]) -> Any:
     )
 
 
+def _publish(settings: Settings, args: argparse.Namespace) -> int:
+    """Deliver what the monitor decided is worth sending. Output-only."""
+    return asyncio.run(_publish_async(settings, args))
+
+
+def _publisher(settings: Settings, args: argparse.Namespace) -> Any:
+    """A publisher wired to the canonical destinations.
+
+    Built here rather than inside the publishing package so the vendor client
+    and the credentials stay outside the layer that formats messages.
+    """
+    from app.core.webhooks import WebhookRegistry  # noqa: PLC0415
+    from app.publishing import DeliveryLedger, Publisher  # noqa: PLC0415
+
+    registry = WebhookRegistry.load(dotenv=Path(".env"))
+    notifier = None
+    if not args.dry_run and registry.enabled:
+        notifier = DiscordWebhookNotifier(
+            settings.discord,
+            max_characters=settings.notifications.max_message_characters,
+            registry=registry,
+        )
+    return Publisher(
+        notifier=notifier,
+        registry=registry,
+        ledger=DeliveryLedger(Path(args.ledger)),
+        dry_run=args.dry_run,
+    )
+
+
+async def _publish_async(settings: Settings, args: argparse.Namespace) -> int:
+    from app.monitoring import EventJournal, build_digest  # noqa: PLC0415
+    from app.publishing import MARKET_TRENDS  # noqa: PLC0415
+    from app.publishing import newsletter as letter  # noqa: PLC0415
+
+    publisher = _publisher(settings, args)
+    command = args.publish_command
+
+    if command == "smoke-test":
+        outcome = await _publish_smoke_test(publisher, args)
+    elif command == "events":
+        run = _monitor_run(settings, args)
+        outcome = await publisher.publish_events(run)
+        await publisher.reconcile(current=run.events)
+    elif command == "portfolio":
+        outcome = await _publish_portfolios(settings, args, publisher)
+    else:
+        since = (datetime.now(UTC).date() - timedelta(days=args.days)).isoformat()
+        journal = EventJournal(Path(args.journal))
+        events = journal.read(since=date.fromisoformat(since))
+        state = _monitor_state(Path(args.state))
+        week_ending = datetime.now(UTC).date().isoformat()
+        if args.if_due and _weekly_already_sent(Path(args.ledger), week_ending):
+            print("weekly newsletter already published for this week")
+            return 0
+        digest = build_digest(events, state, since=since, until=week_ending)
+        message = letter.message(
+            digest,
+            week_ending=week_ending,
+            regime=(state.get("market") or {}).get("SPY"),
+            coverage=_publish_coverage(args),
+            events=events,
+            occurred_at=datetime.now(UTC),
+        )
+        outcome = await publisher.publish_message(
+            MARKET_TRENDS, message, identity=f"weekly:{week_ending}"
+        )
+
+    for item in publisher.rendered:
+        if args.render:
+            print(f"--- {item['channel']}  {item['colour']}  "
+                  f"{item['characters']} chars  content={item['content']!r} ---")
+            print(item["title"])
+            if item["body"]:
+                print(item["body"])
+            for name, value in item["fields"].items():
+                print(f"  [{name}] {value}")
+            print()
+    print(json.dumps(outcome.as_dict(), indent=1) if args.json else _publish_line(outcome))
+    return 0
+
+
+SMOKE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("TRENDS", "market-trends: weekly market intelligence"),
+    ("MARKET", "market-signals: material market and company events"),
+    ("PAPER_1K", "paper-1k: PAPER_1K portfolio analyst"),
+    ("PAPER_3K", "paper-3k: PAPER_3K portfolio analyst"),
+    ("PAPER_10K", "paper-10k: PAPER_10K portfolio analyst"),
+    ("STATUS", "status: operational status"),
+)
+
+
+async def _publish_smoke_test(publisher: Any, args: argparse.Namespace) -> Any:
+    """One clearly-labelled test message per configured destination.
+
+    Every message travels the ordinary routing and transport path, so a success
+    here is evidence about the real delivery route rather than about a special
+    test harness. No market content is manufactured.
+    """
+    from app.core.webhooks import WebhookChannel  # noqa: PLC0415
+    from app.publishing import PublishOutcome  # noqa: PLC0415
+    from app.publishing import format as render  # noqa: PLC0415
+
+    stamp = datetime.now(UTC)
+    combined = PublishOutcome(dry_run=args.dry_run)
+    for name, purpose in SMOKE_TARGETS:
+        channel = WebhookChannel(name)
+        detail: list[str] = []
+        if name.startswith("PAPER_"):
+            # Real, read-only account state rather than invented numbers.
+            snapshot = _paper_snapshot(name)
+            detail = (
+                [
+                    f"**Account:** {name}",
+                    f"**Equity:** ${snapshot.equity:,.2f}",
+                    f"**Positions:** {len(snapshot.positions)}",
+                    f"**Coverage:** {_coverage_label(name)}",
+                ]
+                if snapshot.available
+                else [f"**Account:** {name} unavailable ({snapshot.error})"]
+            )
+        message = render.smoke_test_message(
+            destination=purpose, purpose="verifying routing and delivery",
+            detail=detail, occurred_at=stamp,
+        )
+        outcome = await publisher.publish_message(
+            channel, message, identity=f"smoke:{name}:{stamp.isoformat(timespec='seconds')}"
+        )
+        combined.messages += outcome.messages
+        combined.delivered += outcome.delivered
+        combined.failed += outcome.failed
+        combined.not_configured += outcome.not_configured
+        combined.destinations.extend(outcome.destinations)
+        combined.errors.extend(outcome.errors)
+    return combined
+
+
+def _publish_line(outcome: Any) -> str:
+    if outcome.quiet:
+        return "Nothing to publish."
+    return (
+        f"{outcome.messages} message(s): {outcome.delivered} delivered, "
+        f"{outcome.failed} failed, {outcome.not_configured} unconfigured, "
+        f"{outcome.suppressed_already_delivered} already delivered"
+        + (" [dry run]" if outcome.dry_run else "")
+    )
+
+
+def _weekly_already_sent(ledger_dir: Path, week_ending: str) -> bool:
+    from app.publishing import DeliveryLedger  # noqa: PLC0415
+    from app.publishing.channels import MARKET_TRENDS  # noqa: PLC0415
+
+    return DeliveryLedger(ledger_dir).already_delivered(
+        f"weekly:{week_ending}", MARKET_TRENDS.value
+    )
+
+
+def _publish_coverage(args: argparse.Namespace) -> dict[str, str]:
+    """Factual data-coverage lines for the newsletter footer."""
+    from app.fundamentals import health  # noqa: PLC0415
+
+    state = health(Path(args.facts))
+    return {
+        "SEC coverage": f"{state.symbols:,} symbols, {state.rows:,} facts",
+        "Fact store": str(state.status),
+        "Latest SEC filing": state.newest_filed or "unknown",
+    }
+
+
+def _monitor_run(settings: Settings, args: argparse.Namespace) -> Any:
+    """One monitoring pass, using the persisted baseline."""
+    from app.monitoring import (  # noqa: PLC0415
+        EventJournal,
+        JsonStateStore,
+        MonitoringEngine,
+        MonitoringInputs,
+    )
+
+    bars, sectors, watched = _monitor_market(settings)
+    as_of = args.as_of or max(
+        (max(b.upto("9999-12-31")) for b in bars.values() if b.upto("9999-12-31")),
+        default=None,
+    )
+    contexts, filings = _monitor_companies(settings, watched, as_of or "", args)
+    run = MonitoringEngine(JsonStateStore(Path(args.state))).run(
+        MonitoringInputs(
+            as_of=as_of or "",
+            bars=bars,
+            benchmark="SPY",
+            sectors=sectors,
+            watched=watched,
+            company_contexts=contexts,
+            latest_filings=filings,
+            fact_store_health=_monitor_health(Path(args.facts)),
+        )
+    )
+    EventJournal(Path(args.journal)).append(run.events)
+    return run
+
+
+async def _publish_portfolios(
+    settings: Settings, args: argparse.Namespace, publisher: Any
+) -> Any:
+    """One message per readable account, each to its own channel."""
+    from app.monitoring import (  # noqa: PLC0415
+        EventJournal,
+        JsonStateStore,
+        MonitoringEngine,
+        MonitoringInputs,
+    )
+    from app.publishing import PublishOutcome, paper_channel  # noqa: PLC0415
+    from app.publishing import format as render  # noqa: PLC0415
+
+    bars, sectors, _watched = _monitor_market(settings)
+    as_of = args.as_of or max(
+        (max(b.upto("9999-12-31")) for b in bars.values() if b.upto("9999-12-31")),
+        default="",
+    )
+    prices = {s: b.as_closes() for s, b in bars.items()}
+    service = PortfolioFitService(prices, sectors)
+
+    reports: dict[str, Any] = {}
+    snapshots: dict[str, Any] = {}
+    for slot in ("PAPER_1K", "PAPER_3K", "PAPER_10K"):
+        snapshot = _paper_snapshot(slot)
+        if not snapshot.available:
+            continue
+        snapshots[slot] = snapshot
+        reports[slot] = service.analyse(snapshot.to_portfolio(), as_of=as_of)
+
+    run = MonitoringEngine(JsonStateStore(Path(args.state))).run(
+        MonitoringInputs(as_of=as_of, bars=bars, sectors=sectors, portfolios=reports)
+    )
+    EventJournal(Path(args.journal)).append(run.events)
+
+    combined = PublishOutcome(dry_run=args.dry_run)
+    for slot, report in reports.items():
+        channel = paper_channel(slot)
+        if channel is None:
+            continue
+        events = [e for e in run.events if e.scope.account == slot]
+        if not events and not args.always:
+            continue
+        clusters = service.clusters(snapshots[slot].to_portfolio(), as_of)
+        state, coverage_text = _coverage_state(slot)
+        message = render.portfolio_message(
+            slot,
+            report.exposure,
+            report.risk,
+            events=events,
+            holdings=report.holdings_detail,
+            cluster=clusters[0] if clusters else None,
+            coverage=coverage_text,
+            coverage_state=state,
+            confidence=str(report.confidence),
+            occurred_at=datetime.now(UTC),
+        )
+        outcome = await publisher.publish_message(
+            channel, message, identity=f"portfolio:{slot}:{as_of}"
+        )
+        combined.messages += outcome.messages
+        combined.delivered += outcome.delivered
+        combined.failed += outcome.failed
+        combined.not_configured += outcome.not_configured
+        combined.suppressed_already_delivered += outcome.suppressed_already_delivered
+        combined.destinations.extend(outcome.destinations)
+    return combined
+
+
+def _coverage_state(slot: str) -> tuple[str, str]:
+    """The coverage state name and its display text for one account."""
+    from app.publishing.coverage import resolve  # noqa: PLC0415
+
+    state, text = resolve(slot, _dotenv_env())
+    return str(state), text
+
+
+def _coverage_label(slot: str) -> str:
+    """Configured coverage note for one account. Never empty.
+
+    Read from configuration rather than inferred from holdings: whether an
+    account represents someone's whole portfolio is a fact about their
+    circumstances, and no amount of position data reveals it.
+    """
+    from app.publishing.coverage import label  # noqa: PLC0415
+
+    return label(slot, _dotenv_env())
+
+
+def _dotenv_env() -> dict[str, str]:
+    """Process environment layered over the dotenv file, for read-only lookups."""
+    from app.core.webhooks import _dotenv_values  # noqa: PLC0415
+
+    merged = dict(_dotenv_values(Path(".env")))
+    merged.update(os.environ)
+    return merged
+
+
+def _heartbeat(_settings: Settings, args: argparse.Namespace) -> int:
+    """Ping the external watchdog. Never fails the caller.
+
+    Exits 0 even when the ping fails: this runs from the scheduler, and a
+    non-zero exit would make launchd treat a network blip as a broken job.
+    """
+    from app.ops.heartbeat import HEARTBEAT_ENV, declared_policy, emit  # noqa: PLC0415
+
+    url = _dotenv_env().get(HEARTBEAT_ENV, "")
+    result = emit(url or None, now=datetime.now(UTC))
+    payload = {
+        "sent": result.sent,
+        "configured": result.configured,
+        "attempts": result.attempts,
+        "error": result.error,
+        **declared_policy(),
+    }
+    print(json.dumps(payload, indent=1) if args.json else _heartbeat_line(result))
+    return 0
+
+
+def _heartbeat_line(result: Any) -> str:
+    if not result.configured:
+        return (
+            "heartbeat not configured: set TRADABOT_HEARTBEAT_URL to an external "
+            "dead-man's-switch endpoint (see docs/operations-discord.md)"
+        )
+    return "heartbeat sent" if result.sent else f"heartbeat NOT sent ({result.error})"
+
+
+def _monitor(settings: Settings, args: argparse.Namespace) -> int:
+    """Report what changed since the last run, or that nothing did."""
+    from app.monitoring import (  # noqa: PLC0415
+        EventJournal,
+        JsonStateStore,
+        MonitoringEngine,
+        MonitoringInputs,
+        build_digest,
+    )
+    from app.monitoring.cli import (  # noqa: PLC0415
+        digest_to_json,
+        render_digest,
+        render_run,
+        run_to_json,
+    )
+
+    store = JsonStateStore(Path(args.state))
+    journal = EventJournal(Path(args.journal))
+
+    if args.monitor_command == "digest":
+        since = (datetime.now(UTC).date() - timedelta(days=args.days)).isoformat()
+        events = journal.read(since=date.fromisoformat(since))
+        digest = build_digest(
+            events, _monitor_state(Path(args.state)),
+            since=since, until=datetime.now(UTC).date().isoformat(), limit=args.limit,
+        )
+        print(digest_to_json(digest) if args.json else render_digest(digest))
+        return 0
+
+    bars, sectors, watched = _monitor_market(settings)
+    as_of = args.as_of or max(
+        (max(b.upto("9999-12-31")) for b in bars.values() if b.upto("9999-12-31")),
+        default=None,
+    )
+    if as_of is None:
+        print("DATA NOT SYNCED: no local price history", file=sys.stderr)
+        return 2
+
+    contexts, filings = _monitor_companies(settings, watched, as_of, args)
+    engine = MonitoringEngine(store, cooldowns=not args.ignore_cooldowns)
+    run = engine.run(
+        MonitoringInputs(
+            as_of=as_of,
+            bars=bars,
+            benchmark="SPY",
+            sectors=sectors,
+            watched=watched,
+            company_contexts=contexts,
+            latest_filings=filings,
+            portfolios=_monitor_portfolios(bars, sectors, as_of, args),
+            fact_store_health=_monitor_health(Path(args.facts)),
+        )
+    )
+    if not args.no_journal:
+        journal.append(run.events)
+    print(
+        run_to_json(run)
+        if args.json
+        else render_run(run, evidence=args.evidence, limit=args.limit)
+    )
+    return 0
+
+
+def _monitor_state(directory: Path) -> dict[str, dict[str, Any]]:
+    """The current baseline as plain dictionaries, for unresolved-risk reporting."""
+    out: dict[str, dict[str, Any]] = {}
+    if not directory.exists():
+        return out
+    for path in sorted(directory.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        out[path.stem] = {k: (v or {}).get("state", {}) for k, v in raw.items()}
+    return out
+
+
+def _monitor_market(settings: Settings) -> tuple[dict[str, Any], dict[str, str], list[str]]:
+    """Price history, sector labels and the watched universe."""
+    from app.monitoring import Bars  # noqa: PLC0415
+
+    path = _database_file(settings)
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        candles, _sectors = load_daily(connection)
+        rows = connection.execute(
+            "SELECT i.symbol, w.tags FROM watchlist w "
+            "JOIN instruments i ON i.id = w.instrument_id WHERE w.enabled = 1"
+        ).fetchall()
+    finally:
+        connection.close()
+    bars: dict[str, Any] = {}
+    for (symbol,), group in candles.group_by("symbol", maintain_order=True):
+        records = list(group.iter_rows(named=True))
+        bars[str(symbol)] = Bars(
+            {str(r["timestamp"])[:10]: float(r["close"]) for r in records},
+            {str(r["timestamp"])[:10]: float(r["volume"] or 0) for r in records},
+        )
+    sectors = {str(s): str(json.loads(t)[0]) for s, t in rows if t}
+    sectors.update(_advisor_sectors())
+    watched = sorted({str(s) for s, _t in rows} & set(bars))
+    return bars, sectors, watched
+
+
+def _monitor_companies(
+    settings: Settings, watched: list[str], as_of: str, args: argparse.Namespace
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Advisor context and latest filings, when company monitoring is requested.
+
+    Off by default: a company pass runs the Advisor once per watched symbol,
+    which is the expensive part of a run and only changes on filing days.
+    """
+    if not args.companies:
+        return None, None
+    from app.fundamentals import latest_filings  # noqa: PLC0415
+
+    facts_path = Path(args.facts)
+    prices = _advisor_prices(settings, [*watched, "SPY"])
+    provider = _advisor_context(facts_path, prices)
+    if provider is None:
+        return None, None
+    contexts = {s: provider.context(s, as_of) for s in watched}
+    return contexts, latest_filings(facts_path, symbols=watched, as_of=as_of)
+
+
+def _monitor_portfolios(
+    bars: dict[str, Any],
+    sectors: dict[str, str],
+    as_of: str,
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    """Portfolio Fit reports for each readable paper account."""
+    if not args.accounts:
+        return None
+    prices = {s: b.as_closes() for s, b in bars.items()}
+    service = PortfolioFitService(prices, sectors)
+    out: dict[str, Any] = {}
+    for slot in ("PAPER_1K", "PAPER_3K", "PAPER_10K"):
+        snapshot = _paper_snapshot(slot)
+        if not snapshot.available:
+            continue
+        out[slot] = service.analyse(snapshot.to_portfolio(), as_of=as_of)
+    return out or None
+
+
+def _monitor_health(facts_path: Path) -> Any:
+    from app.fundamentals import health  # noqa: PLC0415
+
+    return health(facts_path)
+
+
+def _database_file(settings: Settings) -> str:
+    url = settings.database_url
+    return url.rsplit("/", maxsplit=1)[-1] if "/" in url else url
+
+
 def _fundamentals(settings: Settings, args: argparse.Namespace) -> int:
     """Inspect or rebuild the persisted SEC fact store."""
     from app.fundamentals import (  # noqa: PLC0415
@@ -2080,6 +2565,9 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "advisor": _advisor,
     "portfolio-fit": _portfolio_fit,
     "fundamentals": _fundamentals,
+    "monitor": _monitor,
+    "publish": _publish,
+    "heartbeat": _heartbeat,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
     ),
@@ -2115,6 +2603,97 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "research": _run_research,
     "history": _run_history,
 }
+
+
+def _add_monitor_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """The monitoring commands: one pass, or a period summary."""
+    monitor = sub.add_parser(
+        "monitor", help="What changed since the last run, or that nothing did"
+    )
+    monitor_sub = monitor.add_subparsers(dest="monitor_command", required=True)
+    for name, description in (
+        ("run", "Detect material changes since the previous run"),
+        ("digest", "Summarise a period from the event journal"),
+    ):
+        parser = monitor_sub.add_parser(name, help=description)
+        parser.add_argument("--state", default="data/monitor_state",
+                            help="Where the previous baseline is kept")
+        parser.add_argument("--journal", default="data/monitor_events",
+                            help="Append-only record of reported events")
+        parser.add_argument("--json", action="store_true", help="Emit structured JSON")
+        if name == "run":
+            parser.add_argument("--as-of", dest="as_of", default=None,
+                                help="Observe as of a past session (YYYY-MM-DD)")
+            parser.add_argument("--facts", default="data/sec_facts.parquet",
+                                help="Fact store used for company context and health")
+            parser.add_argument("--companies", action="store_true",
+                                help="Include company fundamentals, valuation and "
+                                     "filings (runs the Advisor per watched symbol)")
+            parser.add_argument("--accounts", action="store_true",
+                                help="Include read-only paper account portfolios")
+            parser.add_argument("--evidence", action="store_true",
+                                help="Show the measurements and thresholds behind "
+                                     "each event")
+            parser.add_argument("--ignore-cooldowns", action="store_true",
+                                help="Report repeats that a cooldown would suppress")
+            parser.add_argument("--no-journal", action="store_true",
+                                help="Do not append reported events to the journal")
+            parser.add_argument("--limit", type=int, default=10,
+                                help="How many ranked events to display; the run "
+                                     "still records and journals all of them")
+        else:
+            parser.add_argument("--days", type=int, default=7,
+                                help="How far back to summarise")
+            parser.add_argument("--limit", type=int, default=5,
+                                help="Rows per section")
+
+
+
+def _add_publish_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Discord delivery. Output-only, and dry by default until told otherwise."""
+    publish = sub.add_parser(
+        "publish", help="Deliver monitoring output to Discord (output-only)"
+    )
+    publish_sub = publish.add_subparsers(dest="publish_command", required=True)
+    for name, description in (
+        ("events", "Publish material market and company changes to market-signals"),
+        ("portfolio", "Publish per-account analysis to its own paper channel"),
+        ("weekly", "Publish the weekly market intelligence letter to market-trends"),
+        ("smoke-test", "Send one labelled TRADABOT TEST message per destination"),
+    ):
+        parser = publish_sub.add_parser(name, help=description)
+        parser.add_argument("--dry-run", action="store_true",
+                            help="Render and route without sending anything")
+        parser.add_argument("--render", action="store_true",
+                            help="Print every message that would be sent")
+        parser.add_argument("--json", action="store_true", help="Emit structured JSON")
+        parser.add_argument("--state", default="data/monitor_state",
+                            help="Monitoring baseline directory")
+        parser.add_argument("--journal", default="data/monitor_events",
+                            help="Monitoring event journal directory")
+        parser.add_argument("--ledger", default="data/monitor_delivery",
+                            help="Delivery ledger directory (idempotency)")
+        parser.add_argument("--facts", default="data/sec_facts.parquet",
+                            help="Fact store for company context and coverage")
+        parser.add_argument("--as-of", dest="as_of", default=None,
+                            help="Observe as of a past session (YYYY-MM-DD)")
+        if name == "events":
+            parser.add_argument("--companies", action="store_true",
+                                help="Include fundamentals, filings and valuation")
+            parser.add_argument("--accounts", action="store_true",
+                                help=argparse.SUPPRESS)
+        if name == "portfolio":
+            parser.add_argument("--always", action="store_true",
+                                help="Send a report even when nothing changed")
+            parser.add_argument("--companies", action="store_true",
+                                help=argparse.SUPPRESS)
+            parser.add_argument("--accounts", action="store_true",
+                                help=argparse.SUPPRESS)
+        if name == "weekly":
+            parser.add_argument("--days", type=int, default=7,
+                                help="How far back the letter summarises")
+            parser.add_argument("--if-due", dest="if_due", action="store_true",
+                                help="Publish only if this week has not been sent")
 
 
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -2153,6 +2732,14 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
                                 help="Durable per-symbol payload cache")
             parser.add_argument("--force", action="store_true",
                                 help="Re-fetch every symbol, ignoring the cache")
+
+    _add_monitor_parser(sub)
+    _add_publish_parser(sub)
+
+    heartbeat = sub.add_parser(
+        "heartbeat", help="Ping the external watchdog that detects this host going down"
+    )
+    heartbeat.add_argument("--json", action="store_true", help="Emit structured JSON")
 
     fit = sub.add_parser(
         "portfolio-fit", help="Describe how a candidate fits a portfolio (read-only)"

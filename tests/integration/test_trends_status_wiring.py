@@ -794,10 +794,12 @@ async def test_a_stale_scan_during_the_session_is_degraded(
 # Scheduler
 # ---------------------------------------------------------------------------
 def test_the_scheduler_holds_exactly_the_expected_jobs() -> None:
-    """Phase 5.8.2 added trends and status; phase 10.1 added options capture."""
+    """Phase 5.8.2 added trends and status; phase 10.1 added options capture;
+    phase 12.37 added the four presentation jobs."""
     jobs = {job.name: job for job in scheduled_jobs()}
 
     assert set(jobs) == {
+        # trading and data
         "sync",
         "scan",
         "overview",
@@ -805,6 +807,13 @@ def test_the_scheduler_holds_exactly_the_expected_jobs() -> None:
         "trends",
         "status",
         "options",
+        # presentation only, added in phase 12.37; none can reach a broker
+        "monitor-market",
+        "monitor-companies",
+        "monitor-portfolio",
+        "weekly-newsletter",
+        # phase 12.38: the ping an off-host watchdog judges by its absence
+        "heartbeat",
     }
     assert jobs["sync"].interval_seconds == 5 * 60
     assert jobs["scan"].interval_seconds == 15 * 60

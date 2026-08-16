@@ -41,6 +41,13 @@ class NotificationMessage:
     routing_key: str | None = None
     """Destination within the category, e.g. ``"paper-100"``. A backend resolves
     it to a channel; ``None`` means the category's default destination."""
+    colour: int | None = None
+    """Semantic embed colour, when the formatter has one.
+
+    Severity alone cannot carry it: severity says how loudly to shout, while the
+    presentation categories say what *kind* of condition this is -- unusual is
+    not the same as bad, and uncertain is not the same as either. See
+    :mod:`app.publishing.presentation`, which owns the mapping."""
     fields: dict[str, str] = field(default_factory=dict)
     """Structured detail, for backends that can render it natively. The body
     already contains this information -- these are for machines, not humans."""

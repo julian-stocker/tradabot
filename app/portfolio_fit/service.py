@@ -48,6 +48,19 @@ _SECTOR_HEAVY = 0.40
 _MATERIAL_WEIGHT_SHIFT = 0.05
 _LOW_AVERAGE_CORRELATION = _CORR_P75
 
+# Re-exported under public names because the monitoring layer decides materiality
+# against exactly these bands. A second copy there would drift from the
+# calibration that produced them, and the drift would be silent.
+CORRELATION_PERCENTILES: dict[str, float] = {
+    "p75": _CORR_P75,
+    "p90": _CORR_P90,
+    "p99": _CORR_P99,
+}
+MATERIAL_WEIGHT_SHIFT: float = _MATERIAL_WEIGHT_SHIFT
+SECTOR_HEAVY: float = _SECTOR_HEAVY
+TOP3_MODERATE: float = _TOP3_MODERATE
+TOP3_HIGH: float = _TOP3_HIGH
+
 _CASH_ONLY = "CASH ONLY"
 """A portfolio holding no positions. Fully described, not under-described."""
 
@@ -207,6 +220,68 @@ class PortfolioFitService:
             sessions_used=n,
             average_correlation=st.mean(pairs) if pairs else None,
         )
+
+    # ------------------------------------------------------------ clusters
+    def clusters(
+        self, portfolio: Portfolio, as_of: str, sessions: int = _PRIMARY_HORIZON
+    ) -> list[dict[str, object]]:
+        """Groups of holdings that move together, and how much they weigh.
+
+        Two holdings join the same group when their correlation sits at or above
+        the 90th percentile of real equity pairs -- the same calibrated band the
+        candidate analysis uses, not a second threshold. Groups are transitive:
+        if A moves with B and B with C, all three are one cluster, because that
+        is what shared exposure means for the portfolio.
+
+        Single holdings are not clusters and are omitted.
+        """
+        exposure = self.exposure(portfolio)
+        series: dict[str, list[float]] = {}
+        for p in portfolio.positions:
+            history = _returns(self._series(p.symbol, as_of, sessions))
+            if len(history) >= _MIN_SESSIONS:
+                series[p.symbol] = history
+
+        symbols = sorted(series)
+        parent = dict.fromkeys(symbols)
+
+        def find(symbol: str) -> str:
+            while parent[symbol] is not None:
+                symbol = str(parent[symbol])
+            return symbol
+
+        pairs: dict[tuple[str, str], float] = {}
+        for i, a in enumerate(symbols):
+            for b in symbols[i + 1 :]:
+                value = _correlation(series[a], series[b])
+                if value is None or value < _HIGH_CORRELATION:
+                    continue
+                pairs[(a, b)] = value
+                root_a, root_b = find(a), find(b)
+                if root_a != root_b:
+                    parent[root_b] = root_a
+
+        grouped: dict[str, list[str]] = {}
+        for symbol in symbols:
+            grouped.setdefault(find(symbol), []).append(symbol)
+
+        out: list[dict[str, object]] = []
+        for members in grouped.values():
+            if len(members) < 2:  # noqa: PLR2004 -- one holding is not a cluster
+                continue
+            inner = [v for (a, b), v in pairs.items() if a in members and b in members]
+            peak = max(inner) if inner else 0.0
+            out.append(
+                {
+                    "symbols": sorted(members),
+                    "weight": sum(exposure.weights.get(s, 0.0) for s in members),
+                    "max_correlation": peak,
+                    "overlap": (
+                        "EXTREME_OVERLAP" if peak >= _CORR_P99 else "HIGH_OVERLAP"
+                    ),
+                }
+            )
+        return sorted(out, key=lambda c: -float(c["weight"]))  # type: ignore[arg-type]
 
     # ------------------------------------------------------------ candidate
     def candidate_fit(

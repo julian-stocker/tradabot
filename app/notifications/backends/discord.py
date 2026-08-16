@@ -28,6 +28,7 @@ from app.core.config import DiscordSettings
 from app.core.events import EventCategory
 from app.core.logging import get_logger
 from app.core.redaction import redact, safe_message
+from app.core.webhooks import WebhookChannel, WebhookRegistry
 from app.notifications.embeds import build_payload
 from app.notifications.feeds import FeedKey
 from app.notifications.models import DeliveryResult, NotificationMessage
@@ -73,11 +74,49 @@ class DiscordWebhookNotifier:
         *,
         client: httpx.AsyncClient | None = None,
         max_characters: int = 1900,
+        registry: WebhookRegistry | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._max_characters = min(max_characters, DISCORD_CONTENT_LIMIT)
         self._last_error: str | None = None
+        self._registry = registry
+
+    async def send_to(
+        self, channel: WebhookChannel, message: NotificationMessage
+    ) -> DeliveryResult:
+        """Deliver to one canonically named channel.
+
+        Routing comes from :class:`~app.core.webhooks.WebhookRegistry`, which is
+        the single resolver for destination names, rather than from the category
+        defaults used by :meth:`send`. Everything else -- the payload shape, the
+        bounded retry, the redaction, the character limit -- is the same code,
+        because a second transport would be a second place for a webhook URL to
+        leak.
+
+        An unconfigured channel is not a failure and is **never** rerouted: three
+        paper accounts run the same strategy, so one slot's output appearing in
+        another's channel would be a true message producing a false conclusion.
+        """
+        secret = self._registry.url(channel) if self._registry is not None else None
+        url = secret.get_secret_value().strip() if secret is not None else ""
+        if not url:
+            return DeliveryResult(
+                backend=BACKEND_NAME,
+                delivered=False,
+                error=f"no webhook configured for channel '{channel.value}'",
+                attempts=0,
+            )
+        payload: dict[str, Any] = {
+            **build_payload(
+                message,
+                max_characters=self._max_characters,
+                use_embeds=self._settings.use_embeds,
+            ),
+            "username": self._settings.username,
+            "allowed_mentions": {"parse": []},
+        }
+        return await self._post(url, payload, message.category, channel.value)
 
     @property
     def last_error(self) -> str | None:

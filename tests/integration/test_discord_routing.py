@@ -230,14 +230,17 @@ def test_an_absent_value_produces_no_field() -> None:
     assert [field["name"] for field in embed["fields"]] == ["Score"]
 
 
-def test_plaintext_is_always_sent_alongside_the_embed() -> None:
-    """The fallback is not an afterthought: a client that renders no embed still
-    shows the whole message."""
+def test_an_embed_is_never_duplicated_into_plaintext() -> None:
+    """**The gate.** One information payload, one visual representation.
+
+    Discord renders `content` above the embed, so populating both showed every
+    report twice and doubled the screen space each alert consumed.
+    """
     payload = build_payload(_message(Score="87.1"), max_characters=2000)
 
-    assert payload["content"]
-    assert "NVDA" in payload["content"]
+    assert payload["content"] == ""
     assert payload["embeds"]
+    assert "NVDA" in payload["embeds"][0]["title"] + payload["embeds"][0].get("description", "")
 
 
 def test_embeds_can_be_disabled_without_losing_information() -> None:

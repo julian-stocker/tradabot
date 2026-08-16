@@ -1,0 +1,109 @@
+# Off-host dead-man's switch for the Tradabot server.
+#
+# This runs on GitHub's infrastructure, not on the machine it watches. That is
+# the entire point: every health field Tradabot publishes is produced by
+# Tradabot, so a stopped process, a crashed interpreter and an unplugged laptop
+# all look identical from the inside — nothing new appears — and "nothing new
+# appeared" is also what a quiet market looks like.
+#
+# The Tradabot host pings an external endpoint every 5 minutes (the scheduled
+# heartbeat job). This workflow reads the age of the most recent ping and alerts
+# Discord when it exceeds the grace period. If the laptop is off, this still runs
+# and still alerts, because nothing in this path touches the laptop.
+#
+# BEFORE THIS WORKS, two things must be provisioned by an operator:
+#
+#   1. A heartbeat endpoint that records a timestamp and can report it. Any
+#      dead-man's-switch service works (healthchecks.io, Better Stack, Cronitor);
+#      set its ping URL as TRADABOT_HEARTBEAT_URL in the host's .env, and its
+#      read/status URL as the HEARTBEAT_STATUS_URL repository secret here.
+#   2. DISCORD_STATUS_WEBHOOK as a repository secret, so this workflow can post
+#      to #status without the Tradabot host being involved.
+#
+# Until both exist this workflow is inert by design — it reports a configuration
+# gap rather than inventing a liveness verdict it cannot support.
+
+name: tradabot-watchdog
+
+on:
+  schedule:
+    # Every 15 minutes: one full grace period, so a DOWN host is noticed within
+    # roughly one interval of becoming reportable.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate heartbeat age
+        env:
+          HEARTBEAT_STATUS_URL: ${{ secrets.HEARTBEAT_STATUS_URL }}
+          DISCORD_STATUS_WEBHOOK: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
+          # Must match app/ops/heartbeat.py. Declared in both places because the
+          # two run in different runtimes and cannot import from one another.
+          GRACE_SECONDS: "900"
+          INTERVAL_SECONDS: "300"
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+          from datetime import datetime, timezone
+
+          status_url = os.environ.get("HEARTBEAT_STATUS_URL", "").strip()
+          webhook = os.environ.get("DISCORD_STATUS_WEBHOOK", "").strip()
+          grace = int(os.environ["GRACE_SECONDS"])
+
+          if not status_url or not webhook:
+              # Not a failure: nothing is provisioned yet. Saying so is more
+              # useful than a red build nobody can act on.
+              print("watchdog inert: heartbeat status URL or Discord webhook not configured")
+              sys.exit(0)
+
+          def get(url):
+              request = urllib.request.Request(url, headers={"User-Agent": "tradabot-watchdog"})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.loads(response.read())
+
+          try:
+              payload = get(status_url)
+          except Exception as exc:
+              print(f"heartbeat status unreachable: {type(exc).__name__}")
+              sys.exit(1)
+
+          last = payload.get("last_ping") or payload.get("last_seen")
+          now = datetime.now(timezone.utc)
+          if not last:
+              state, detail = "UNKNOWN", "no heartbeat has ever been recorded"
+              age = None
+          else:
+              seen = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+              age = int((now - seen).total_seconds())
+              state = "DOWN" if age > grace else "UP"
+              detail = f"last heartbeat {age}s ago"
+
+          print(f"state={state} {detail}")
+          if state not in ("DOWN", "UNKNOWN"):
+              sys.exit(0)
+
+          body = {
+              "username": "tradabot-watchdog",
+              "allowed_mentions": {"parse": []},
+              "content": (
+                  f"🔴 **TRADABOT SERVER {state}**\n"
+                  f"{detail}.\n"
+                  f"Grace period: {grace}s.\n\n"
+                  "This alert originates from GitHub Actions, not from the Tradabot "
+                  "host, so it is delivered even when that host is off.\n"
+                  "No trading action was taken; Tradabot is read-only."
+              ),
+          }
+          request = urllib.request.Request(
+              webhook, data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json", "User-Agent": "tradabot-watchdog"},
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              print(f"alert posted: HTTP {response.status}")
+          PY

@@ -17,6 +17,7 @@ from app.fundamentals.store import (
     FactStoreHealth,
     FactStoreStatus,
     health,
+    latest_filings,
     schema_hash,
 )
 from app.fundamentals.sync import (
@@ -43,6 +44,7 @@ __all__ = [
     "SyncOutcome",
     "database_path",
     "health",
+    "latest_filings",
     "schema_hash",
     "sync_facts",
     "universe_symbols",

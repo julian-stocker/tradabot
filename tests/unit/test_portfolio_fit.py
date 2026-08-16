@@ -308,3 +308,42 @@ class TestBeforeAfterDeltas:
             Portfolio("P", 500.0, (Position("AAA", 5.0, 100.0),)), "BBB", "2026-01-02"
         )
         assert fit.deltas() == ()
+
+
+class TestClusters:
+    """Holdings that move together are one exposure, however many tickers it has."""
+
+    @staticmethod
+    def _prices(pattern: dict[str, list[float]]) -> dict[str, dict[str, float]]:
+        return {
+            symbol: {f"2025-{1 + i // 28:02d}-{1 + i % 28:02d}": v
+                     for i, v in enumerate(series)}
+            for symbol, series in pattern.items()
+        }
+
+    def test_correlated_holdings_form_one_cluster(self) -> None:
+        up = [100 + i * (1 + (i % 3)) for i in range(120)]
+        flat = [100 + (i % 2) for i in range(120)]
+        prices = self._prices({"AAA": up, "BBB": up, "CCC": flat})
+        service = PortfolioFitService(prices, {})
+        portfolio = Portfolio(
+            "P", 0.0,
+            (Position("AAA", 1.0, 100.0), Position("BBB", 1.0, 100.0),
+             Position("CCC", 1.0, 100.0)),
+        )
+        clusters = service.clusters(portfolio, "2025-12-31")
+        assert len(clusters) == 1
+        assert clusters[0]["symbols"] == ["AAA", "BBB"]
+        assert clusters[0]["weight"] == pytest.approx(2 / 3)
+
+    def test_a_single_holding_is_not_a_cluster(self) -> None:
+        prices = self._prices({"AAA": [100 + i for i in range(120)]})
+        service = PortfolioFitService(prices, {})
+        portfolio = Portfolio("P", 0.0, (Position("AAA", 1.0, 100.0),))
+        assert service.clusters(portfolio, "2025-12-31") == []
+
+    def test_clusters_use_the_calibrated_band_not_a_new_threshold(self) -> None:
+        from app.portfolio_fit import CORRELATION_PERCENTILES
+        from app.portfolio_fit.service import _HIGH_CORRELATION
+
+        assert CORRELATION_PERCENTILES["p90"] == _HIGH_CORRELATION

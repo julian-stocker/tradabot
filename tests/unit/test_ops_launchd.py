@@ -44,8 +44,9 @@ def paths(tmp_path: Path) -> dict[str, Path]:
 # ---------------------------------------------------------------------------
 # Cadence
 # ---------------------------------------------------------------------------
-def test_seven_jobs_at_the_documented_cadence() -> None:
-    """Phase 5.8.2 added trends and status; phase 10.1 added the option collector.
+def test_every_job_runs_at_the_documented_cadence() -> None:
+    """Phase 5.8.2 added trends and status; phase 10.1 added the option collector;
+    phase 12.37 added the four presentation jobs.
 
     Neither trends nor status fetches market data -- they read what sync and scan
     persisted -- so matching the scan interval costs nothing and keeps
@@ -56,6 +57,7 @@ def test_seven_jobs_at_the_documented_cadence() -> None:
     jobs = {job.name: job for job in scheduled_jobs()}
 
     assert set(jobs) == {
+        # trading and data
         "sync",
         "scan",
         "overview",
@@ -63,6 +65,13 @@ def test_seven_jobs_at_the_documented_cadence() -> None:
         "trends",
         "status",
         "options",
+        # presentation only, added in phase 12.37; none can reach a broker
+        "monitor-market",
+        "monitor-companies",
+        "monitor-portfolio",
+        "weekly-newsletter",
+        # phase 12.38: the ping an off-host watchdog judges by its absence
+        "heartbeat",
     }
     assert jobs["options"].interval_seconds == 20 * 60
     assert jobs["sync"].interval_seconds == 5 * 60
@@ -70,6 +79,24 @@ def test_seven_jobs_at_the_documented_cadence() -> None:
     assert jobs["overview"].interval_seconds == 60 * 60
     assert jobs["trends"].interval_seconds == 15 * 60
     assert jobs["status"].interval_seconds == 15 * 60
+    # Presentation cadences. The market monitor runs through the session; the
+    # company pass is daily because fundamentals move on filing days and each
+    # pass runs the Advisor once per watched symbol.
+    assert jobs["monitor-market"].interval_seconds == 30 * 60
+    assert jobs["monitor-companies"].interval_seconds == 24 * 60 * 60
+    assert jobs["monitor-portfolio"].interval_seconds == 4 * 60 * 60
+    assert jobs["weekly-newsletter"].interval_seconds == 6 * 60 * 60
+    assert jobs["heartbeat"].interval_seconds == 5 * 60
+
+
+def test_the_presentation_jobs_cannot_mutate_a_broker() -> None:
+    """**The gate.** Every job added for reporting is read-only by command."""
+    presentation = {"monitor-market", "monitor-companies", "monitor-portfolio",
+                    "weekly-newsletter", "heartbeat"}
+    for job in scheduled_jobs():
+        if job.name in presentation:
+            assert job.args[0] in ("publish", "heartbeat")
+            assert not ({"submit", "cancel", "close", "exit"} & set(job.args))
 
 
 def test_the_cadence_follows_configuration() -> None:

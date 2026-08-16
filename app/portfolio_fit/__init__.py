@@ -29,10 +29,23 @@ from app.portfolio_fit.schemas import (
     Position,
     RiskEstimate,
 )
-from app.portfolio_fit.service import CORRELATION_HORIZONS, PortfolioFitService
+from app.portfolio_fit.service import (
+    CORRELATION_HORIZONS,
+    CORRELATION_PERCENTILES,
+    MATERIAL_WEIGHT_SHIFT,
+    SECTOR_HEAVY,
+    TOP3_HIGH,
+    TOP3_MODERATE,
+    PortfolioFitService,
+)
 
 __all__ = [
     "CORRELATION_HORIZONS",
+    "CORRELATION_PERCENTILES",
+    "MATERIAL_WEIGHT_SHIFT",
+    "SECTOR_HEAVY",
+    "TOP3_HIGH",
+    "TOP3_MODERATE",
     "UNAVAILABLE",
     "AccountSnapshot",
     "CandidateFit",

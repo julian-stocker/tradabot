@@ -12,9 +12,13 @@ resistance levels and no probability estimates, so an embed must never show
 them -- a field labelled "Target" that came from nowhere is worse than no field,
 because the reader cannot tell the difference.
 
-**Plaintext is the fallback, not an afterthought.** ``content`` is always sent
-alongside, so a client that cannot render embeds, a webhook that rejects them,
-and the console backend all still show the whole message.
+**One payload, one visual representation.** When an embed is sent, ``content``
+is left empty. Sending both put the same report on screen twice -- once as a
+plain paragraph and again inside the coloured card -- which doubled the length
+of every alert and made a phone screen show one message where it should show
+three. The plaintext rendering is still produced when embeds are switched off,
+so nothing is lost for a client that cannot render them; it is simply no longer
+sent *as well*.
 """
 
 from __future__ import annotations
@@ -79,7 +83,13 @@ def build_embed(message: NotificationMessage) -> dict[str, Any]:
     """
     embed: dict[str, Any] = {
         "title": _clip(message.title, MAX_TITLE),
-        "color": COLOURS.get(message.severity, COLOURS[Severity.INFO]),
+        # A formatter-supplied semantic colour wins: it knows whether a state is
+        # unusual, uncertain or genuinely bad, which severity cannot express.
+        "color": (
+            message.colour
+            if message.colour is not None
+            else COLOURS.get(message.severity, COLOURS[Severity.INFO])
+        ),
         "timestamp": message.occurred_at.isoformat(),
     }
 
@@ -108,16 +118,20 @@ def build_embed(message: NotificationMessage) -> dict[str, Any]:
 def build_payload(
     message: NotificationMessage, *, max_characters: int, use_embeds: bool = True
 ) -> dict[str, Any]:
-    """The full webhook payload: embed plus plaintext fallback.
+    """The webhook payload: an embed, **or** plaintext, never both.
 
-    ``content`` is always present. Discord shows both, and the duplication is
-    deliberate -- it costs a few hundred characters and guarantees the message
-    survives a client that renders no embeds at all.
+    Discord renders ``content`` above the embed, so populating both shows the
+    same report twice. The embed carries everything -- title, body, fields,
+    timestamp -- so ``content`` is empty whenever an embed is present.
+
+    With ``use_embeds=False`` the full rendered text goes in ``content``, which
+    is what the console backend and any embed-less destination receive.
     """
-    payload: dict[str, Any] = {"content": message.rendered(max_characters)}
-    if use_embeds:
-        payload["embeds"] = [build_embed(message)]
-    return payload
+    if not use_embeds:
+        return {"content": message.rendered(max_characters)}
+    # Empty rather than absent: Discord accepts an empty content field beside an
+    # embed, and being explicit documents that the omission is deliberate.
+    return {"content": "", "embeds": [build_embed(message)]}
 
 
 def _clip(value: str, limit: int) -> str:

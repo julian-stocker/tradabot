@@ -23,6 +23,7 @@ the CLI and Discord would disagree about whether the system is up.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -227,6 +228,7 @@ def build_fields(
     discord_destinations: int = 0,
     jobs: tuple[str, ...] = (),
     volatility: str | None = None,
+    monitor: Mapping[str, str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, str]:
     """The dashboard grid.
@@ -278,6 +280,12 @@ def build_fields(
     fields["Discord"] = discord
     fields["Last delivery"] = f"{_ago(last_ok, moment)} ago" if last_ok else "never"
 
+    # Publisher health, supplied by the monitoring layer rather than derived
+    # here. Stable values only -- a timestamp that moves every tick would
+    # republish the dashboard on every heartbeat.
+    for label, value in (monitor or {}).items():
+        fields[label] = value
+
     for portfolio in status.portfolios:
         fields[portfolio.key] = (
             f"{portfolio.equity:,.2f} · {portfolio.open_positions} open · "
@@ -294,7 +302,17 @@ def build_fields(
 
 
 VOLATILE_FIELDS: Final[frozenset[str]] = frozenset(
-    {"Checked", "Last sync", "Last scan", "Last delivery"}
+    {
+        "Checked",
+        "Last sync",
+        "Last scan",
+        "Last delivery",
+        "Last monitor run",
+        "Last successful Discord delivery",
+        "Last fundamentals sync",
+        "Last market event",
+        "Last weekly digest",
+    }
 )
 """Fields that change on every tick without the system changing.
 

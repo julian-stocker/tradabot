@@ -13,8 +13,9 @@ is the single question #status exists to answer.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -102,6 +103,7 @@ class StatusService:
             discord_destinations=len(self._settings.discord.configured_categories),
             jobs=tuple(job.name for job in _jobs(self._settings)),
             volatility=volatility,
+            monitor=_monitor_health(),
             now=moment,
         )
 
@@ -190,6 +192,68 @@ class StatusService:
         # Losing the id costs one duplicate message next tick, not a broken run.
         except Exception as exc:
             logger.warning("could not persist dashboard state", error=safe_message(exc))
+
+
+def _monitor_health() -> dict[str, str]:
+    """Publisher and monitoring health, read from their own state directories.
+
+    Read-only and failure-tolerant: the status dashboard must still render when
+    the monitoring layer has never run, so every absence becomes a value rather
+    than an exception.
+    """
+    from app.monitoring.journal import EventJournal  # noqa: PLC0415
+    from app.ops.heartbeat import HEARTBEAT_ENV, declared_policy  # noqa: PLC0415
+    from app.publishing.ledger import DeliveryLedger  # noqa: PLC0415
+
+    def stamp(path: Path) -> str:
+        if not path.exists():
+            return "never"
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+
+    out: dict[str, str] = {}
+    try:
+        # Liveness first, and deliberately blunt. Every other field here is
+        # produced by this machine, so none of them can tell "quiet" from "off".
+        # Stating that stops "last sync 1m ago" from being read as "the server is
+        # up right now" -- which it never was.
+        beats = int(declared_policy()["heartbeat_interval_seconds"]) // 60
+        out["Server heartbeat"] = (
+            f"emitted every {beats}m; liveness judged off-host"
+            if _configured(HEARTBEAT_ENV)
+            else "NOT CONFIGURED — this dashboard cannot detect a stopped server"
+        )
+        ledger = DeliveryLedger()
+        pending = ledger.pending_failures()
+        out["Application"] = "HEALTHY" if not ledger.is_empty() else "NO RUNS RECORDED"
+        out["Discord delivery"] = "DEGRADED" if pending else "HEALTHY"
+        out["Pending delivery failures"] = str(len(pending))
+        last = ledger.last_delivery()
+        out["Last successful Discord delivery"] = (
+            str(last)[:16].replace("T", " ") + " UTC" if last else "never"
+        )
+        events = EventJournal().read()
+        out["Last market event"] = (
+            str(events[-1].get("occurred_at"))[:16].replace("T", " ") + " UTC"
+            if events
+            else "none recorded"
+        )
+        out["Last monitor run"] = stamp(Path("data/monitor_state/market.json"))
+        out["Last fundamentals sync"] = stamp(Path("data/sec_facts.parquet"))
+    except Exception as exc:
+        logger.warning("monitor health unavailable", reason=type(exc).__name__)
+        out["Application"] = "UNKNOWN"
+    return out
+
+
+def _configured(name: str) -> bool:
+    """Whether a setting has a value. **Presence only** -- never the value."""
+    from app.core.webhooks import _dotenv_values  # noqa: PLC0415
+
+    merged = dict(_dotenv_values(Path(".env")))
+    merged.update(os.environ)
+    return bool(merged.get(name, "").strip())
 
 
 async def _volatility_health(session: AsyncSession, *, now: datetime) -> str | None:

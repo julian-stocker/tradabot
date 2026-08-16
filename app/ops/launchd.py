@@ -65,6 +65,11 @@ def scheduled_jobs(
     trends_minutes: int = 15,
     status_minutes: int = 15,
     options_minutes: int = 20,
+    market_monitor_minutes: int = 30,
+    company_monitor_minutes: int = 60 * 24,
+    portfolio_monitor_minutes: int = 60 * 4,
+    weekly_newsletter_minutes: int = 60 * 6,
+    heartbeat_minutes: int = 5,
 ) -> tuple[ScheduledJob, ...]:
     """The seven jobs, at the configured cadence.
 
@@ -133,6 +138,56 @@ def scheduled_jobs(
             args=("ops", "status-publish"),
             interval_seconds=status_minutes * 60,
             description="Status dashboard heartbeat; edits one message, market open or shut",
+        ),
+        # ---- presentation only. None of these can reach a broker. ----------
+        ScheduledJob(
+            name="monitor-market",
+            args=("publish", "events"),
+            interval_seconds=market_monitor_minutes * 60,
+            description=(
+                "Detect and publish material market changes. Price-driven, so it "
+                "runs through the session; the monitor decides whether anything is "
+                "worth sending and most passes send nothing."
+            ),
+        ),
+        ScheduledJob(
+            name="monitor-companies",
+            args=("publish", "events", "--companies"),
+            interval_seconds=company_monitor_minutes * 60,
+            description=(
+                "Fundamentals, filings and valuation bands. Daily is sufficient: "
+                "these change on filing days, and a company pass runs the Advisor "
+                "once per watched symbol."
+            ),
+        ),
+        ScheduledJob(
+            name="monitor-portfolio",
+            args=("publish", "portfolio"),
+            interval_seconds=portfolio_monitor_minutes * 60,
+            description=(
+                "Read-only paper account analysis, each slot to its own channel. "
+                "Reads the broker; never writes to it."
+            ),
+        ),
+        ScheduledJob(
+            name="heartbeat",
+            args=("heartbeat",),
+            interval_seconds=heartbeat_minutes * 60,
+            description=(
+                "Ping the off-host watchdog. The only job whose absence is itself "
+                "the signal: nothing here can report that this machine stopped, so "
+                "something elsewhere infers it from the silence."
+            ),
+        ),
+        ScheduledJob(
+            name="weekly-newsletter",
+            args=("publish", "weekly", "--if-due"),
+            interval_seconds=weekly_newsletter_minutes * 60,
+            description=(
+                "Weekly market intelligence. Runs often and decides for itself "
+                "whether the week is due, so a slept machine still publishes once "
+                "rather than skipping the week entirely."
+            ),
         ),
     )
 

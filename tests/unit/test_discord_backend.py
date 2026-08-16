@@ -237,9 +237,13 @@ async def test_a_long_message_is_truncated_rather_than_rejected() -> None:
     result = await notifier.send(make_message(body="x" * 5_000))
 
     assert result.delivered
-    content = json.loads(recorder.requests[0].content)["content"]
-    assert len(content) <= 2000
-    assert content.startswith("TITLE"), "the important part survives truncation"
+    payload = json.loads(recorder.requests[0].content)
+    # The report now lives in the embed alone; `content` is deliberately empty
+    # so the same text is not rendered twice.
+    assert payload["content"] == ""
+    embed = payload["embeds"][0]
+    assert embed["title"].startswith("TITLE"), "the important part survives truncation"
+    assert len(embed["description"]) <= 4096, "clipped to Discord's embed limit"
 
 
 # ---------------------------------------------------------------------------
