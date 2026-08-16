@@ -220,28 +220,47 @@ STATES: Final[dict[str, State]] = {
     "NET_CASH": _s(
         "NET_CASH", "Net cash", Semantic.GOOD,
         "Cash and liquid resources exceed debt.",
+        short="holds net cash",
     ),
     "ACCEPTABLE": _s(
         "ACCEPTABLE", "Acceptable balance sheet", Semantic.NEUTRAL,
-        "Debt is present but modest relative to the balance sheet.",
+        "Debt is present but modest relative to the cash the business generates.",
+        short="carries moderate net debt",
     ),
     "LEVERAGED": _s(
         "LEVERAGED", "Leveraged", Semantic.BAD,
-        "Debt is large relative to equity and cash.",
+        "Debt is large relative to the cash the business generates.",
+        short="carries substantial net debt",
     ),
     "MATERIAL_DILUTION": _s(
-        "MATERIAL_DILUTION", "Material dilution", Semantic.BAD,
+        "MATERIAL_DILUTION", "Material share-count increase", Semantic.BAD,
         "The share count increased materially, reducing each existing share's "
         "ownership percentage.",
+        short="materially increasing",
     ),
     "BUYBACK_REDUCING_SHARE_COUNT": _s(
-        "BUYBACK_REDUCING_SHARE_COUNT", "Share count reducing", Semantic.GOOD,
-        "The share count fell, so each remaining share represents a larger "
-        "ownership percentage.",
+        "BUYBACK_REDUCING_SHARE_COUNT", "Share count decreasing", Semantic.GOOD,
+        "Fewer shares are outstanding than in the comparison period, so each "
+        "remaining share represents a larger ownership percentage.",
+        short="decreasing",
     ),
     "STABLE": _s(
         "STABLE", "Share count stable", Semantic.NEUTRAL,
         "The share count has not changed materially.",
+        short="stable",
+    ),
+    "DILUTING": _s(
+        "DILUTING", "Share count increasing", Semantic.BAD,
+        "More shares are outstanding than in the comparison period, so each "
+        "existing share represents a smaller ownership percentage.",
+        short="increasing",
+    ),
+    "SPLIT_ADJUSTMENT_REQUIRED": _s(
+        "SPLIT_ADJUSTMENT_REQUIRED", "Share-count trend unavailable",
+        Semantic.UNAVAILABLE,
+        "A stock split falls inside the comparison window, so the before and "
+        "after counts are not comparable.",
+        short="unavailable",
     ),
     # -- portfolio --------------------------------------------------------
     "HIGH_CONCENTRATION": _s(

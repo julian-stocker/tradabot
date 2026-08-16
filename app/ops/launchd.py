@@ -46,6 +46,14 @@ class ScheduledJob:
     args: tuple[str, ...]
     interval_seconds: int
     description: str
+    long_running: bool = False
+    """A daemon rather than a periodic job.
+
+    launchd expresses the two differently: a periodic job gets ``StartInterval``
+    and is not run at load, while a daemon is started at login and restarted
+    when it exits. Giving a long-running process a ``StartInterval`` would ask
+    launchd to start a *second* copy every interval while the first is still
+    running."""
 
     @property
     def label(self) -> str:
@@ -202,12 +210,19 @@ def build_plist(
     otherwise a scheduled job quietly creates a *second* database in whatever
     directory launchd happened to start in, and the two diverge invisibly.
     """
+    schedule: dict[str, object] = (
+        # Restarted when it exits, with a throttle so a crash loop backs off
+        # instead of spinning. ThrottleInterval is launchd's own minimum gap
+        # between respawns.
+        {"KeepAlive": True, "RunAtLoad": True, "ThrottleInterval": job.interval_seconds}
+        if job.long_running
+        else {"StartInterval": job.interval_seconds, "RunAtLoad": False}
+    )
     return {
         "Label": job.label,
         "WorkingDirectory": str(project_root),
         "ProgramArguments": [str(python_path), "-m", "app.cli", *job.args],
-        "StartInterval": job.interval_seconds,
-        "RunAtLoad": False,
+        **schedule,
         "StandardOutPath": str(log_dir / f"{job.name}.log"),
         "StandardErrorPath": str(log_dir / f"{job.name}.err"),
         "ProcessType": "Background",
@@ -258,6 +273,28 @@ def install_commands(jobs: tuple[ScheduledJob, ...], *, target_dir: Path) -> lis
 
 def uninstall_commands(jobs: tuple[ScheduledJob, ...], *, target_dir: Path) -> list[str]:
     return [f"launchctl unload -w {target_dir / job.plist_name}" for job in jobs]
+
+
+def daemon_jobs(*, restart_throttle_seconds: int = 30) -> tuple[ScheduledJob, ...]:
+    """Long-running processes, kept apart from the scheduled jobs.
+
+    Separate from :func:`scheduled_jobs` so the twelve periodic jobs remain
+    exactly twelve: the status dashboard counts them, and a daemon appearing in
+    that list would read as a thirteenth scheduled task.
+    """
+    return (
+        ScheduledJob(
+            name="discord-bot",
+            args=("discord-bot",),
+            interval_seconds=restart_throttle_seconds,
+            description=(
+                "Interactive Discord bot serving /check. Long-running, restarted "
+                "on exit. Independent of the publisher jobs: a bot crash stops no "
+                "monitoring, and a publisher failure does not disconnect the bot."
+            ),
+            long_running=True,
+        ),
+    )
 
 
 def launchctl_available() -> bool:

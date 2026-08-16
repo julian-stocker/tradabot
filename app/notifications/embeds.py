@@ -90,8 +90,9 @@ def build_embed(message: NotificationMessage) -> dict[str, Any]:
             if message.colour is not None
             else COLOURS.get(message.severity, COLOURS[Severity.INFO])
         ),
-        "timestamp": message.occurred_at.isoformat(),
     }
+    if message.show_timestamp:
+        embed["timestamp"] = message.occurred_at.isoformat()
 
     if message.body:
         embed["description"] = _clip(message.body, MAX_DESCRIPTION)
@@ -108,7 +109,9 @@ def build_embed(message: NotificationMessage) -> dict[str, Any]:
     if fields:
         embed["fields"] = fields
 
-    footer = " · ".join(part for part in (message.event_type.value, message.routing_key) if part)
+    footer = message.footer or " · ".join(
+        part for part in (message.event_type.value, message.routing_key) if part
+    )
     if footer:
         embed["footer"] = {"text": footer}
 

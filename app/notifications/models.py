@@ -48,6 +48,16 @@ class NotificationMessage:
     presentation categories say what *kind* of condition this is -- unusual is
     not the same as bad, and uncertain is not the same as either. See
     :mod:`app.publishing.presentation`, which owns the mapping."""
+    show_timestamp: bool = True
+    """Whether the embed carries Discord's native timestamp.
+
+    Discord renders footer text and timestamp on one line joined by a bullet.
+    A card whose footer is a disclaimer reads badly that way, so it can opt
+    out and place its own as-of where the reader expects it."""
+    footer: str | None = None
+    """Overrides the default footer, which names the event type. A formatter
+    that has a disclaimer to place puts it here, where Discord renders it small
+    and last."""
     fields: dict[str, str] = field(default_factory=dict)
     """Structured detail, for backends that can render it natively. The body
     already contains this information -- these are for machines, not humans."""

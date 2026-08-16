@@ -72,6 +72,7 @@ from app.ops.check import operational_status, run_checks
 from app.ops.launchd import (
     LAUNCH_AGENTS_DIR,
     ScheduledJob,
+    daemon_jobs,
     install_commands,
     scheduled_jobs,
     uninstall_commands,
@@ -859,6 +860,24 @@ def _ops_install(settings: Settings) -> int:
     for command in install_commands(jobs, target_dir=LAUNCH_AGENTS_DIR):
         print(f"  {command}")
     print("\nOr: make ops-start")
+
+    # The bot is a daemon, not a scheduled job, so it is written and offered
+    # separately. Loading it starts a process that stays running.
+    daemons = daemon_jobs()
+    write_plists(
+        daemons,
+        project_root=PROJECT_ROOT,
+        python_path=Path(sys.executable),
+        log_dir=LOG_DIR,
+        target_dir=LAUNCH_AGENTS_DIR,
+    )
+    print(f"\nwrote {len(daemons)} long-running agent template(s):")
+    for job in daemons:
+        print(f"  {job.label:<28} restart throttle {job.interval_seconds}s  "
+              f"{job.description}")
+    print("\nThe interactive bot is not started either. To activate it:")
+    for command in install_commands(daemons, target_dir=LAUNCH_AGENTS_DIR):
+        print(f"  {command}")
     return 0
 
 
@@ -2260,6 +2279,62 @@ def _dotenv_env() -> dict[str, str]:
     return merged
 
 
+def _discord_bot(settings: Settings, args: argparse.Namespace) -> int:
+    """Run the interactive Discord bot until stopped.
+
+    A long-running process, deliberately separate from the scheduled publisher
+    jobs: a bot crash must not stop market monitoring, and a publisher failure
+    must not disconnect the bot.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    from app.discord_bot import BotConfigurationError, load  # noqa: PLC0415
+    from app.discord_bot.bot import run  # noqa: PLC0415
+
+    try:
+        bot_settings = load()
+    except BotConfigurationError as exc:
+        print(f"DISCORD BOT NOT CONFIGURED: {exc}", file=sys.stderr)
+        return 2
+
+    if args.check_config:
+        print(json.dumps(bot_settings.describe(), indent=1))
+        return 0
+
+    def factory() -> Any:
+        return _build_analyst(settings, Path(args.facts))
+
+    try:
+        _asyncio.run(run(bot_settings, analyst_factory=factory))
+    except KeyboardInterrupt:
+        print("discord bot stopped")
+    return 0
+
+
+def _build_analyst(settings: Settings, facts_path: Path) -> Any:
+    """Assemble the analyst from the production layers. Computes nothing itself."""
+    from app.advisor import AdvisorService, FactStore  # noqa: PLC0415
+    from app.discord_bot.analysis import StockAnalyst  # noqa: PLC0415
+    from app.fundamentals import health  # noqa: PLC0415
+
+    state = health(facts_path)
+    prices = _advisor_prices(settings, None)
+    sectors = _advisor_sectors()
+    facts = FactStore.from_parquet(facts_path) if state.ok else FactStore([])
+    advisor = AdvisorService(facts, prices, sectors=sectors)
+    as_of = max((max(v.closes) for v in prices.values() if v.closes), default="")
+
+    # No broker handle: /check answers a company question, so an Alpaca outage
+    # cannot slow it down or degrade it.
+    return StockAnalyst(
+        advisor=advisor,
+        universe=sorted(prices),
+        fundamentals=frozenset(facts.symbols) if state.ok else frozenset(),
+        fact_store_ready=state.ok,
+        as_of=as_of,
+    )
+
+
 def _heartbeat(_settings: Settings, args: argparse.Namespace) -> int:
     """Ping the external watchdog. Never fails the caller.
 
@@ -2540,8 +2615,13 @@ def _advisor(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
-def _advisor_prices(settings: Settings, symbols: list[str]) -> dict[str, Any]:
-    """Split-adjusted closes for the Advisor, read from the local database."""
+def _advisor_prices(settings: Settings, symbols: list[str] | None) -> dict[str, Any]:
+    """Split-adjusted closes for the Advisor, read from the local database.
+
+    ``None`` means every instrument, which is what the interactive bot needs:
+    it cannot know in advance which symbol someone will ask about, and an empty
+    universe makes every request look like an unknown ticker.
+    """
     url = settings.database_url
     path = url.rsplit("/", maxsplit=1)[-1] if "/" in url else url
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -2549,11 +2629,11 @@ def _advisor_prices(settings: Settings, symbols: list[str]) -> dict[str, Any]:
         candles, _sectors = load_daily(connection)
     finally:
         connection.close()
-    wanted = set(symbols)
+    wanted = None if symbols is None else set(symbols)
     out: dict[str, Any] = {}
     for (symbol,), group in candles.group_by("symbol", maintain_order=True):
         name = str(symbol)
-        if name not in wanted:
+        if wanted is not None and name not in wanted:
             continue
         out[name] = PriceSeries(
             {str(r["timestamp"])[:10]: float(r["close"]) for r in group.iter_rows(named=True)}
@@ -2568,6 +2648,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "monitor": _monitor,
     "publish": _publish,
     "heartbeat": _heartbeat,
+    "discord-bot": _discord_bot,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
     ),
@@ -2740,6 +2821,14 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
         "heartbeat", help="Ping the external watchdog that detects this host going down"
     )
     heartbeat.add_argument("--json", action="store_true", help="Emit structured JSON")
+
+    bot = sub.add_parser(
+        "discord-bot", help="Run the interactive Discord bot (/check). Long-running."
+    )
+    bot.add_argument("--facts", default="data/sec_facts.parquet",
+                     help="Fact store the Advisor reads")
+    bot.add_argument("--check-config", action="store_true",
+                     help="Report configuration presence and exit; sends nothing")
 
     fit = sub.add_parser(
         "portfolio-fit", help="Describe how a candidate fits a portfolio (read-only)"
