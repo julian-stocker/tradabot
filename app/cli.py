@@ -1865,16 +1865,37 @@ def _run_research(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def _portfolio_fit(settings: Settings, args: argparse.Namespace) -> int:
-    """Describe a portfolio, and optionally a hypothetical addition. Read-only."""
-    holdings: list[tuple[str, float]] = []
-    cash = float(args.cash)
-    for item in args.holding or []:
-        try:
-            symbol, quantity = item.split(":", maxsplit=1)
-        except ValueError:
-            print(f"holding must look like SYMBOL:QTY, got {item!r}", file=sys.stderr)
+    """Describe a portfolio, and optionally a hypothetical addition. Read-only.
+
+    The portfolio comes either from a paper account slot -- read from the broker,
+    never modified -- or from holdings given on the command line. Both paths
+    reach the same analysis; only where the positions come from differs.
+    """
+    name = str(args.portfolio).upper()
+    # Any PAPER_* name is routed to the account reader, including one that does
+    # not exist. Falling through to the inline path would silently describe an
+    # empty portfolio named PAPER_50K, which reads exactly like a real account
+    # that happens to be flat.
+    if name.startswith("PAPER_"):
+        snapshot = _paper_snapshot(name)
+        if not snapshot.available:
+            print(f"ACCOUNT UNAVAILABLE: {name}: {snapshot.error}", file=sys.stderr)
             return 2
-        holdings.append((symbol.upper(), float(quantity)))
+        portfolio = snapshot.to_portfolio()
+        holdings = [(p.symbol, p.quantity) for p in portfolio.positions]
+        cash = portfolio.cash
+    else:
+        portfolio = None
+        cash = float(args.cash)
+        holdings = []
+        for item in args.holding or []:
+            try:
+                symbol, quantity = item.split(":", maxsplit=1)
+            except ValueError:
+                print(f"holding must look like SYMBOL:QTY, got {item!r}", file=sys.stderr)
+                return 2
+            holdings.append((symbol.upper(), float(quantity)))
+
     prices = _advisor_prices(
         settings,
         [s for s, _q in holdings] + ([args.candidate.upper()] if args.candidate else [])
@@ -1886,26 +1907,116 @@ def _portfolio_fit(settings: Settings, args: argparse.Namespace) -> int:
     if as_of is None:
         print("DATA NOT SYNCED: no local price history", file=sys.stderr)
         return 2
-    positions: list[Position] = []
-    for symbol, quantity in holdings:
-        series = prices.get(symbol)
-        if series is None or not series.closes:
-            print(f"DATA NOT SYNCED: no price history for {symbol}", file=sys.stderr)
-            return 2
-        days = [d for d in series.closes if d <= as_of]
-        positions.append(Position(symbol, quantity, series.closes[max(days)]))
-    sectors = _advisor_sectors()
+    if portfolio is None:
+        positions: list[Position] = []
+        for symbol, quantity in holdings:
+            series = prices.get(symbol)
+            if series is None or not series.closes:
+                print(f"DATA NOT SYNCED: no price history for {symbol}", file=sys.stderr)
+                return 2
+            days = [d for d in series.closes if d <= as_of]
+            positions.append(Position(symbol, quantity, series.closes[max(days)]))
+        portfolio = Portfolio(args.portfolio, cash, tuple(positions), as_of)
+
     service = PortfolioFitService(
-        {k: v.closes for k, v in prices.items()}, sectors
+        {k: v.closes for k, v in prices.items()},
+        _advisor_sectors(),
+        _advisor_context(Path(args.facts), prices),
     )
     report = service.analyse(
-        Portfolio(args.portfolio, cash, tuple(positions), as_of),
-        as_of=as_of,
-        candidate=args.candidate,
-        amount=args.amount,
+        portfolio, as_of=as_of, candidate=args.candidate, amount=args.amount
     )
     print(fit_to_json(report) if args.json else render_fit(report))
     return 0
+
+
+def _paper_snapshot(slot: str) -> Any:
+    """One read-only paper account snapshot.
+
+    The reader is constructed here rather than inside the analysis package, so
+    the vendor client stays unreachable from anything that describes portfolios.
+    """
+    from app.broker.paper_snapshots import PaperAccountSnapshotReader  # noqa: PLC0415
+
+    return PaperAccountSnapshotReader().snapshot(slot)
+
+
+def _advisor_context(facts_path: Path, prices: dict[str, Any]) -> Any:
+    """Company context from the production Advisor, or nothing at all.
+
+    An unsynced fact store costs the report its narrative blocks and leaves the
+    portfolio arithmetic untouched, which is why this returns ``None`` instead
+    of refusing.
+    """
+    if not facts_path.exists():
+        return None
+    from app.advisor.context import AdvisorCompanyContext  # noqa: PLC0415
+
+    try:
+        facts = FactStore.from_parquet(facts_path)
+    except Exception:
+        return None
+    return AdvisorCompanyContext(
+        AdvisorService(facts, prices, sectors=_advisor_sectors())
+    )
+
+
+def _fundamentals(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect or rebuild the persisted SEC fact store."""
+    from app.fundamentals import (  # noqa: PLC0415
+        database_path,
+        health,
+        sync_facts,
+        universe_symbols,
+    )
+
+    store = Path(args.store)
+    if args.fundamentals_command == "status":
+        state = health(store)
+        if args.json:
+            print(json.dumps(state.as_dict(), indent=1))
+        else:
+            print(f"FACT STORE {state.status}")
+            print(f"  path              {state.path}")
+            print(f"  rows              {state.rows:,}")
+            print(f"  symbols           {state.symbols:,}")
+            print(f"  metrics           {state.metrics}")
+            print(f"  filings           {state.oldest_filed} to {state.newest_filed}")
+            print(f"  newest acceptance {state.newest_accepted}")
+            if state.acceptance_coverage is not None:
+                print(f"  acceptance cover  {state.acceptance_coverage * 100:.1f}%")
+            print(f"  schema            {state.schema_version} ({state.schema_hash})")
+            if state.detail:
+                print(f"  detail            {state.detail}")
+            for note in state.notes:
+                print(f"  note              {note}")
+        return 0 if state.ok else 1
+
+    symbols = (
+        _parse_symbols(args.symbols)
+        if args.symbols
+        else universe_symbols(database_path(settings.database_url))
+    )
+    print(f"syncing {len(symbols)} symbols from SEC EDGAR into {store}")
+
+    def _progress(index: int, total: int, outcome: Any) -> None:
+        if index % 50 == 0 or outcome.status == "UNAVAILABLE":
+            print(f"  {index}/{total} {outcome.symbol} {outcome.status}", flush=True)
+
+    result = sync_facts(
+        symbols,
+        output=store,
+        cache_dir=Path(args.cache),
+        force=args.force,
+        progress=_progress,
+    )
+    print(
+        f"wrote {result.written:,} facts for {result.symbols:,} symbols "
+        f"({result.fetched} fetched, {result.from_cache} cached, "
+        f"{result.failed} unavailable, {len(result.unmapped)} unmapped) "
+        f"in {result.seconds:.0f}s"
+    )
+    return 0 if result.written else 1
 
 
 def _advisor_sectors() -> dict[str, str]:
@@ -1968,6 +2079,7 @@ def _advisor_prices(settings: Settings, symbols: list[str]) -> dict[str, Any]:
 _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "advisor": _advisor,
     "portfolio-fit": _portfolio_fit,
+    "fundamentals": _fundamentals,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
     ),
@@ -2016,13 +2128,41 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
     advisor.add_argument("--json", action="store_true", help="Emit structured JSON")
     advisor.add_argument("--provenance", action="store_true",
                          help="Show the SEC concept, filing and accession behind each figure")
-    advisor.add_argument("--facts", default="reports/phase12_22/fundamental_observations.parquet",
+    advisor.add_argument("--facts", default="data/sec_facts.parquet",
                          help="Path to the persisted point-in-time SEC fact store")
+
+    fundamentals = sub.add_parser(
+        "fundamentals", help="The persisted SEC fact store the Advisor reads"
+    )
+    fundamentals_sub = fundamentals.add_subparsers(
+        dest="fundamentals_command", required=True
+    )
+    for name, description in (
+        ("status", "Report whether the fact store is synced, stale or corrupt"),
+        ("sync", "Rebuild the fact store from SEC EDGAR (resumable, idempotent)"),
+    ):
+        parser = fundamentals_sub.add_parser(name, help=description)
+        parser.add_argument("--store", default="data/sec_facts.parquet",
+                            help="Path to the persisted fact store")
+        parser.add_argument("--json", action="store_true", help="Emit structured JSON")
+        if name == "sync":
+            parser.add_argument("--symbols", default=None,
+                                help="Comma-separated tickers; defaults to every "
+                                     "instrument with daily history")
+            parser.add_argument("--cache", default="data/sec_cache",
+                                help="Durable per-symbol payload cache")
+            parser.add_argument("--force", action="store_true",
+                                help="Re-fetch every symbol, ignoring the cache")
 
     fit = sub.add_parser(
         "portfolio-fit", help="Describe how a candidate fits a portfolio (read-only)"
     )
-    fit.add_argument("portfolio", help="Name for the portfolio being described")
+    fit.add_argument("portfolio",
+                     help="PAPER_1K, PAPER_3K or PAPER_10K to read a real paper "
+                          "account, or any other name for a portfolio given inline")
+    fit.add_argument("--facts", default="data/sec_facts.parquet",
+                     help="Fact store used for company context; omitted context "
+                          "leaves the portfolio analysis intact")
     fit.add_argument("--cash", type=float, default=0.0, help="Cash held")
     fit.add_argument("--holding", action="append",
                      help="Position as SYMBOL:QTY, repeatable")

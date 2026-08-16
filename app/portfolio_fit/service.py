@@ -14,6 +14,7 @@ import statistics as st
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
+from app.portfolio_fit.context import CompanyContext, CompanyContextProvider
 from app.portfolio_fit.schemas import (
     CandidateFit,
     Concentration,
@@ -36,10 +37,19 @@ _MIN_SESSIONS = 40
 # Descriptive concentration bands. Declared, not fitted to any outcome.
 _TOP3_MODERATE = 0.50
 _TOP3_HIGH = 0.70
-_HIGH_CORRELATION = 0.70
+# Calibrated from 4,000 random real BROAD_CLEAN pairs over 252 sessions, not
+# from any example portfolio. The previous 0.70 sat above the 99th percentile
+# (0.509) of real equity pairs, so it effectively never fired.
+_CORR_P75 = 0.1809
+_CORR_P90 = 0.2955
+_CORR_P99 = 0.5088
+_HIGH_CORRELATION = _CORR_P90
 _SECTOR_HEAVY = 0.40
 _MATERIAL_WEIGHT_SHIFT = 0.05
-_LOW_AVERAGE_CORRELATION = 0.30
+_LOW_AVERAGE_CORRELATION = _CORR_P75
+
+_CASH_ONLY = "CASH ONLY"
+"""A portfolio holding no positions. Fully described, not under-described."""
 
 
 def _returns(closes: Sequence[float]) -> list[float]:
@@ -71,9 +81,25 @@ class PortfolioFitService:
         self,
         prices: Mapping[str, Mapping[str, float]],
         sectors: Mapping[str, str] | None = None,
+        context_provider: CompanyContextProvider | None = None,
     ) -> None:
         self._prices = prices
         self._sectors = sectors or {}
+        self._context = context_provider
+
+    def _company_context(self, symbol: str, as_of: str) -> CompanyContext | None:
+        """Company context for one symbol, if a provider was supplied.
+
+        Wrapped because portfolio arithmetic must survive a context source that
+        is missing, unsynced or broken. A description that cannot be fetched
+        costs the report a narrative block, not its numbers.
+        """
+        if self._context is None:
+            return None
+        try:
+            return self._context.context(symbol, as_of)
+        except Exception:
+            return CompanyContext.missing(symbol.upper())
 
     # ------------------------------------------------------------ helpers
     def _series(self, symbol: str, as_of: str, sessions: int) -> list[float]:
@@ -135,7 +161,16 @@ class PortfolioFitService:
         self, portfolio: Portfolio, as_of: str, sessions: int = _PRIMARY_HORIZON
     ) -> RiskEstimate:
         equity = portfolio.equity
-        if equity <= 0 or not portfolio.positions:
+        if not portfolio.positions:
+            # An all-cash account is not a portfolio we know too little about;
+            # it is one with no market exposure. Those are different states, and
+            # calling the second "insufficient data" reads as a failure when the
+            # description is in fact complete.
+            return RiskEstimate(
+                basis=_CASH_ONLY,
+                insufficient_reason="all cash; there is no market exposure to describe",
+            )
+        if equity <= 0:
             return RiskEstimate(insufficient_reason="no positions")
         series: dict[str, list[float]] = {}
         for p in portfolio.positions:
@@ -240,6 +275,7 @@ class PortfolioFitService:
             state=state,
             reasons=tuple(reasons),
             confidence=confidence,
+            context=self._company_context(symbol, as_of),
         )
 
     def _describe_fit(
@@ -266,7 +302,10 @@ class PortfolioFitService:
             )
         elif high_corr:
             state = FitState.HIGH_OVERLAP
-            reasons.append("correlated at or above 0.70 with " + ", ".join(high_corr))
+            reasons.append(
+                f"correlated at or above the 90th percentile of real equity pairs "
+                f"({_CORR_P90:.2f}) with " + ", ".join(high_corr)
+            )
         elif sector_before >= _SECTOR_HEAVY:
             state = FitState.INCREASES_CONCENTRATION
             reasons.append(f"{sector} is already {sector_before * 100:.1f}% of equity")
@@ -314,6 +353,11 @@ class PortfolioFitService:
                 "weight": exposure.weights.get(p.symbol, 0.0),
                 "sector": self._sectors.get(p.symbol, "unknown"),
                 "unrealised": p.unrealised,
+                "context": (
+                    context.as_dict()
+                    if (context := self._company_context(p.symbol, when)) is not None
+                    else None
+                ),
             }
             for p in sorted(portfolio.positions, key=lambda x: -x.market_value)
         )
@@ -323,6 +367,22 @@ class PortfolioFitService:
             else None
         )
         reasons: list[str] = []
+        if not portfolio.positions:
+            # Nothing about "100% cash, no holdings" is uncertain, so the report
+            # says so rather than inheriting the price-history confidence of a
+            # portfolio that has no prices to look up.
+            return PortfolioFitReport(
+                portfolio=portfolio.name,
+                as_of=when,
+                exposure=exposure,
+                risk=risk,
+                holdings_detail=detail,
+                candidate=fit,
+                confidence=FitConfidence.HIGH,
+                confidence_reasons=(
+                    "the account holds only cash; its exposure is fully known",
+                ),
+            )
         history = (
             FitConfidence.HIGH
             if risk.sessions_used >= _PRIMARY_HORIZON

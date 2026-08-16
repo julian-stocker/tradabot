@@ -19,6 +19,7 @@ from app.portfolio_fit import (
     PortfolioFitService,
     Position,
 )
+from app.portfolio_fit.context import UNAVAILABLE, CompanyContext
 from app.portfolio_fit.schemas import FitConfidence, weakest
 
 PACKAGE = Path("app/portfolio_fit")
@@ -190,3 +191,120 @@ class TestConfidence:
         assert risk.annualised_volatility is None
         assert risk.insufficient_reason is not None
         assert risk.basis == "HISTORICAL ESTIMATE"
+
+
+class TestCompanyContextIsBorrowed:
+    """Company context is displayed beside the arithmetic, never computed here."""
+
+    class _Provider:
+        def __init__(self, context=None, raises=False):
+            self._context = context
+            self._raises = raises
+            self.asked: list[str] = []
+
+        def context(self, symbol, as_of):
+            self.asked.append(symbol)
+            if self._raises:
+                msg = "fact store unavailable"
+                raise RuntimeError(msg)
+            return self._context or CompanyContext(
+                symbol=symbol,
+                available=True,
+                summary=f"{symbol}: factual summary",
+                valuation_context="NORMAL_VS_HISTORY",
+                confidence="HIGH",
+            )
+
+    @staticmethod
+    def _portfolio() -> Portfolio:
+        return Portfolio("P", 500.0, (Position("AAA", 5.0, 100.0),))
+
+    def test_no_financial_formula_is_reimplemented(self) -> None:
+        """**The gate.** The Advisor owns fundamentals; a second copy would drift."""
+        # Named specifically. Correlation percentiles are this layer's own work;
+        # what must never appear here is a *fundamental* recomputed locally.
+        duplicated = ("ttm(", "revenue", "operating_margin", "gross_margin",
+                      "free_cash_flow", "shares_outstanding", "ps_percentile",
+                      "market_cap", "earnings_yield")
+        for path, source in _sources():
+            body = source.split('"""', 2)[-1]
+            for token in duplicated:
+                assert token not in body, f"{path} recomputes {token}"
+
+    def test_the_package_does_not_import_the_advisor(self) -> None:
+        """The protocol points inward; the Advisor satisfies it from its own side."""
+        for path, source in _sources():
+            for node in ast.walk(ast.parse(source)):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                for name in names:
+                    assert not name.startswith("app.advisor"), f"{path} imports {name}"
+
+    def test_context_is_attached_to_holdings_and_candidate(self) -> None:
+        provider = self._Provider()
+        service = PortfolioFitService({}, {}, provider)
+        report = service.analyse(
+            self._portfolio(), as_of="2026-01-02", candidate="BBB", amount=100.0
+        )
+        assert report.holdings_detail[0]["context"]["summary"] == "AAA: factual summary"
+        assert report.candidate is not None
+        assert report.candidate.context is not None
+        assert report.candidate.context.valuation_context == "NORMAL_VS_HISTORY"
+        assert set(provider.asked) == {"AAA", "BBB"}
+
+    def test_a_broken_context_source_does_not_fail_the_analysis(self) -> None:
+        """**The gate.** Missing narrative costs a block, never the numbers."""
+        service = PortfolioFitService({}, {}, self._Provider(raises=True))
+        report = service.analyse(self._portfolio(), as_of="2026-01-02")
+        assert report.exposure.equity == 1000.0
+        assert report.holdings_detail[0]["weight"] == 0.5
+        context = report.holdings_detail[0]["context"]
+        assert context["available"] is False
+        assert context["unavailable_reason"] == UNAVAILABLE
+
+    def test_an_unavailable_context_is_named_rather_than_omitted(self) -> None:
+        provider = self._Provider(CompanyContext.missing("AAA"))
+        report = PortfolioFitService({}, {}, provider).analyse(
+            self._portfolio(), as_of="2026-01-02"
+        )
+        assert report.holdings_detail[0]["context"]["unavailable_reason"] == UNAVAILABLE
+
+    def test_without_a_provider_nothing_is_invented(self) -> None:
+        report = PortfolioFitService({}, {}).analyse(
+            self._portfolio(), as_of="2026-01-02"
+        )
+        assert report.holdings_detail[0]["context"] is None
+
+
+class TestBeforeAfterDeltas:
+    def test_deltas_describe_the_change_in_both_directions(self) -> None:
+        prices = {
+            "AAA": {f"2025-{m:02d}-01": 100.0 for m in range(1, 13)},
+            "BBB": {f"2025-{m:02d}-01": 50.0 for m in range(1, 13)},
+        }
+        service = PortfolioFitService(prices, {"AAA": "tech", "BBB": "energy"})
+        fit = service.candidate_fit(
+            Portfolio("P", 500.0, (Position("AAA", 5.0, 100.0),)),
+            "BBB",
+            "2025-12-01",
+            amount=200.0,
+        )
+        rows = {r["measure"]: r for r in fit.deltas()}
+        # 4 whole shares at 50 -> 200 spent, cash 500 -> 300, equity unchanged.
+        assert rows["cash"]["before"] == 500.0
+        assert rows["cash"]["after"] == 300.0
+        assert rows["cash"]["delta"] == -200.0
+        assert rows["candidate_weight"]["before"] == 0.0
+        assert rows["candidate_weight"]["after"] == pytest.approx(0.2)
+        assert rows["sector::energy"]["delta"] == pytest.approx(0.2)
+        assert rows["sector::tech"]["delta"] == pytest.approx(0.0)
+
+    def test_no_amount_means_no_deltas_rather_than_a_guess(self) -> None:
+        service = PortfolioFitService({}, {})
+        fit = service.candidate_fit(
+            Portfolio("P", 500.0, (Position("AAA", 5.0, 100.0),)), "BBB", "2026-01-02"
+        )
+        assert fit.deltas() == ()

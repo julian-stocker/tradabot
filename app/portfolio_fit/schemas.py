@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from app.portfolio_fit.context import CompanyContext
+
 
 class Concentration(StrEnum):
     LOW = "LOW_CONCENTRATION"
@@ -165,6 +167,65 @@ class CandidateFit:
     state: FitState = FitState.INSUFFICIENT
     reasons: tuple[str, ...] = ()
     confidence: FitConfidence = FitConfidence.INSUFFICIENT
+    context: CompanyContext | None = None
+    """Company context from the Advisor, shown beside the portfolio effect and
+    never folded into it. ``None`` when no provider was supplied; an
+    *unavailable* context when one was and the company could not be described."""
+
+    def deltas(self) -> tuple[dict[str, Any], ...]:
+        """Before, after and change for each portfolio measure.
+
+        Only populated when a hypothetical amount was supplied. Every row is a
+        difference between two descriptions; none of it is a projection.
+        """
+        if self.after is None:
+            return ()
+        sector_keys = sorted(
+            set(self.before.sector_weights) | set(self.after.sector_weights)
+        )
+        rows: list[dict[str, Any]] = [
+            _delta("cash", self.before.cash, self.after.cash),
+            _delta("invested_pct", self.before.invested_pct, self.after.invested_pct),
+            _delta(
+                "candidate_weight",
+                self.before.weights.get(self.symbol, 0.0),
+                self.after.weights.get(self.symbol, 0.0),
+            ),
+            _delta(
+                "largest_position_pct",
+                self.before.largest_position[1] if self.before.largest_position else 0.0,
+                self.after.largest_position[1] if self.after.largest_position else 0.0,
+            ),
+            _delta("top3_pct", self.before.top3_pct, self.after.top3_pct),
+        ]
+        rows.extend(
+            _delta(
+                f"sector::{sector}",
+                self.before.sector_weights.get(sector, 0.0),
+                self.after.sector_weights.get(sector, 0.0),
+            )
+            for sector in sector_keys
+        )
+        rows.append(
+            _delta(
+                "average_correlation",
+                self.before_risk.average_correlation,
+                self.after_risk.average_correlation if self.after_risk else None,
+            )
+        )
+        rows.append(
+            _delta(
+                "annualised_volatility",
+                self.before_risk.annualised_volatility,
+                self.after_risk.annualised_volatility if self.after_risk else None,
+            )
+        )
+        return tuple(rows)
+
+
+def _delta(name: str, before: float | None, after: float | None) -> dict[str, Any]:
+    change = None if before is None or after is None else after - before
+    return {"measure": name, "before": before, "after": after, "delta": change}
 
 
 @dataclass(frozen=True, slots=True)

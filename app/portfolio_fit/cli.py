@@ -28,10 +28,14 @@ def render(report: PortfolioFitReport) -> str:
     if not report.holdings_detail:
         out.append("  (no positions)")
     for h in report.holdings_detail:
-        out.append(
+        line = (
             f"  {h['symbol']:<8}{_pct(h['weight']):>8}   ${h['market_value']:>12,.2f}"
             f"   {h['sector']}"
         )
+        if h.get("unrealised") is not None:
+            line += f"   unrealised ${h['unrealised']:+,.2f}"
+        out.append(line)
+        out.extend(_context_lines(h.get("context"), indent="      "))
     out += ["", "SECTORS"]
     for sector, weight in sorted(e.sector_weights.items(), key=lambda kv: -kv[1]):
         out.append(f"  {sector:<24}{_pct(weight):>8}")
@@ -83,26 +87,86 @@ def _render_candidate(report: PortfolioFitReport) -> list[str]:
             f"  least similar holding   {c.min_correlation[0]} "
             f"({c.min_correlation[1]:.2f})"
         )
-    if c.after is not None:
-        out += ["", "  AFTER (hypothetical)"]
-        out.append(f"    candidate weight      {_pct(c.after.weights.get(c.symbol))}")
-        out.append(
-            f"    cash                  {_pct(c.before.cash_pct)} -> "
-            f"{_pct(c.after.cash_pct)}"
-        )
-        out.append(
-            f"    top-3 concentration   {_pct(c.before.top3_pct)} -> "
-            f"{_pct(c.after.top3_pct)}"
-        )
-        if c.after_risk is not None:
-            out.append(
-                f"    volatility            "
-                f"{_pct(c.before_risk.annualised_volatility)} -> "
-                f"{_pct(c.after_risk.annualised_volatility)}"
-            )
+    if c.context is not None:
+        out += ["", "  COMPANY CONTEXT"]
+        out.extend(_context_lines(c.context.as_dict(), indent="    ", full=True))
+    deltas = c.deltas()
+    if deltas:
+        out += [
+            "",
+            "  PORTFOLIO EFFECT (hypothetical, no order is placed)",
+            f"    {'measure':<26}{'before':>12}{'after':>12}{'change':>12}",
+        ]
+        out.extend(f"    {row}" for row in _delta_rows(deltas))
     out += ["", f"  FIT: {c.state}"]
     out.extend(f"    - {x}" for x in c.reasons)
     out.append(f"    confidence: {c.confidence}")
+    return out
+
+
+_CASH_MEASURES = frozenset({"cash"})
+
+
+def _delta_rows(deltas: tuple[dict[str, Any], ...]) -> list[str]:
+    """One line per measure. Cash is money; everything else is a proportion."""
+    rows: list[str] = []
+    for row in deltas:
+        measure = str(row["measure"]).replace("sector::", "sector ")
+        money = row["measure"] in _CASH_MEASURES
+
+        def fmt(value: float | None, *, as_money: bool = money) -> str:
+            if value is None:
+                return "n/a"
+            return f"${value:,.0f}" if as_money else f"{value * 100:.1f}%"
+
+        change = row["delta"]
+        shown = (
+            "  —"
+            if change is None
+            else (f"{change:+,.0f}" if money else f"{change * 100:+.1f}pp")
+        )
+        rows.append(
+            f"{measure:<26}{fmt(row['before']):>12}{fmt(row['after']):>12}{shown:>12}"
+        )
+    return rows
+
+
+def _context_lines(
+    context: dict[str, Any] | None, *, indent: str, full: bool = False
+) -> list[str]:
+    """Render borrowed Advisor context. Never derives a figure of its own."""
+    if context is None:
+        return []
+    if not context.get("available"):
+        return [f"{indent}company context: {context.get('unavailable_reason')}"]
+    out: list[str] = []
+    if full:
+        if context.get("summary"):
+            out.append(f"{indent}{context['summary']}")
+        if context.get("valuation_context"):
+            value = context.get("valuation_value")
+            shown = f" (P/S {value:.2f})" if isinstance(value, (int, float)) else ""
+            out.append(f"{indent}valuation: {context['valuation_context']}{shown}")
+        if context.get("market_position"):
+            out.append(f"{indent}market position: {context['market_position']}")
+        labels = context.get("labels") or {}
+        if labels:
+            out.append(
+                indent
+                + "labels: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
+            )
+        out.append(f"{indent}company-analysis confidence: {context.get('confidence')}")
+    else:
+        bits = [
+            b
+            for b in (
+                context.get("valuation_context"),
+                f"confidence {context.get('confidence')}",
+            )
+            if b
+        ]
+        out.append(f"{indent}{' · '.join(bits)}")
     return out
 
 
