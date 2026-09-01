@@ -29,6 +29,11 @@ logs/
 data/
 *.db
 *.sqlite3
+# SQLite write-ahead-log sidecars. Transient runtime state that SQLite
+# creates and checkpoints away; `*.db` does not match them, so they were
+# committed once by accident (8878421).
+*.db-wal
+*.db-shm
 
 # Editors / OS
 .idea/
