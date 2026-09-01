@@ -139,6 +139,17 @@ class EdgarClient:
         """Every XBRL fact for one filer."""
         return self._get(COMPANYFACTS_URL.format(cik=cik))
 
+    def submissions(self, cik: int) -> dict[str, Any]:
+        """The whole submissions document for one filer.
+
+        The raw payload, because callers want different parts of it: entity
+        name and SIC for identity, acceptance times for provenance, and the
+        per-filing ``items`` array for event classification. Returning it once
+        lets a caller take all three from a single request instead of asking
+        this endpoint three times for three fields of the same document.
+        """
+        return self._get(SUBMISSIONS_URL.format(cik=cik))
+
     def profile(self, cik: int) -> dict[str, str]:
         """Entity name and SIC classification for one filer.
 

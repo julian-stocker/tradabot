@@ -1,0 +1,327 @@
+"""What a research event is, and what Phase 15.0 refuses to claim about one.
+
+A :class:`ResearchEvent` says *the primary source establishes that this
+happened*. That is a narrower statement than it looks, and the narrowness is
+the design:
+
+* It is not a claim about what the event means for the business. SEC Item 1.01
+  establishes that a material definitive agreement was entered into. It does
+  not establish that a company won a major customer contract, and this phase
+  never upgrades the first into the second.
+* It is not a claim about direction. Materiality is how much attention the
+  event warrants, never whether it is good or bad. There is no field in which
+  a direction could be recorded.
+* It is not a claim about consequence. ``historical_evidence`` is
+  ``NOT_ESTABLISHED`` on every event this phase produces, and it is an enum
+  member rather than a nullable string so the absence is structural.
+
+Relationship to ``NEW_SEC_FILING``
+----------------------------------
+:mod:`app.monitoring` already emits ``NEW_SEC_FILING``, which means *an
+accession appeared*. That is a different and smaller statement, and the two are
+deliberately not merged: one is a transition in a monitored baseline, the other
+is a classified occurrence with provenance. Monitoring answers "what changed
+since the last run"; this answers "what does the filing establish".
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+
+class EventScope(StrEnum):
+    """Whether the event is true of the issuer or of one traded line.
+
+    Every event this phase produces is ``COMPANY``. SEC filing *metadata* names
+    a registrant, never a venue -- even Item 3.01, which is about a listing
+    standard, does not say which listing in the structured fields. Inventing a
+    listing scope from a company-level source is exactly the borrowing Phase 13
+    exists to prevent, so ``LISTING`` is defined and currently unreachable.
+    """
+
+    COMPANY = "COMPANY"
+    LISTING = "LISTING"
+
+
+class EventKind(StrEnum):
+    """What the filing establishes, from SEC form and item semantics alone.
+
+    Each member maps to one or more documented 8-K item codes whose official
+    title names the event. Nothing here is inferred from filing text.
+    """
+
+    EARNINGS_RELEASE = "EARNINGS_RELEASE"
+    """Item 2.02, whose title is *Results of Operations and Financial
+    Condition*. Overwhelmingly an earnings release in practice, and the item
+    admits any disclosure of results -- so the name is the common reading while
+    ``fact_summary`` carries the item's own wording."""
+    MANAGEMENT_CHANGE = "MANAGEMENT_CHANGE"
+    """Item 5.02, which covers a chief executive resigning and a director being
+    elected at the annual meeting with equal standing. Metadata cannot separate
+    them, so neither the kind nor the materiality distinguishes seniority."""
+    M_AND_A = "M_AND_A"
+    """Item 2.01, *Completion of Acquisition or Disposition of Assets*. Two
+    things the label understates: it is **completion**, not announcement, and it
+    includes **disposals** as well as acquisitions. A sold division files here
+    exactly as a bought one does."""
+    MATERIAL_AGREEMENT = "MATERIAL_AGREEMENT"
+    """Items 1.01 and 1.02 -- entry into, and termination of. Which one is
+    carried by ``classifying_item`` and stated in ``fact_summary``; the kind
+    does not distinguish them because both are material-agreement events."""
+    DEBT_EVENT = "DEBT_EVENT"
+    """Items 2.03 (creation of a direct financial obligation) and 2.04
+    (triggering events that accelerate or increase one). Deliberately vaguer
+    than either item rather than narrower than both."""
+    ACCOUNTING_RESTATEMENT = "ACCOUNTING_RESTATEMENT"
+    """Item 4.02, whose title is *Non-Reliance on Previously Issued Financial
+    Statements*.
+
+    The name is the industry term and the item is narrower than it: the
+    registrant has stated that prior financials should no longer be relied
+    upon. A restatement is the usual consequence and is not itself established
+    by the filing, so ``fact_summary`` quotes the item title rather than the
+    kind name. Read the kind as a label, the summary as the claim."""
+    AUDITOR_CHANGE = "AUDITOR_CHANGE"
+    BANKRUPTCY_OR_RECEIVERSHIP = "BANKRUPTCY_OR_RECEIVERSHIP"
+    IMPAIRMENT = "IMPAIRMENT"
+    EXIT_OR_DISPOSAL_COSTS = "EXIT_OR_DISPOSAL_COSTS"
+    LISTING_RULE_MATTER = "LISTING_RULE_MATTER"
+    CONTROL_CHANGE = "CONTROL_CHANGE"
+    CYBERSECURITY_INCIDENT = "CYBERSECURITY_INCIDENT"
+    UNREGISTERED_EQUITY_SALE = "UNREGISTERED_EQUITY_SALE"
+    PERIODIC_REPORT = "PERIODIC_REPORT"
+    """A scheduled financial report -- 10-K, 10-Q, 20-F, 40-F.
+
+    Classified from the form alone, which is enough: the form *is* the
+    statement that a periodic report was filed for a period. No item codes are
+    involved and none are needed. Kept apart from
+    ``UNCLASSIFIED_SEC_FILING`` because lumping them together would hide a real
+    distinction behind an honest-sounding label -- a 10-Q is a known kind of
+    filing, a 6-K is a catch-all whose contents the form does not constrain."""
+    UNCLASSIFIED_SEC_FILING = "UNCLASSIFIED_SEC_FILING"
+    """A filing Tradabot holds and cannot classify from metadata.
+
+    The honest state for every foreign private issuer's 6-K, 20-F and 40-F --
+    measured across SAP, Novo Nordisk and Royal Bank of Canada, 1,322 such
+    filings carry **zero** item codes. Recording them unclassified keeps the
+    coverage boundary visible; guessing that a 6-K "usually contains earnings"
+    would put a semantic claim behind a metadata-only pipeline."""
+
+
+class SourceType(StrEnum):
+    REGULATOR = "REGULATOR"
+    ISSUER = "ISSUER"
+    EXCHANGE = "EXCHANGE"
+    NEWS_AGENCY = "NEWS_AGENCY"
+    PUBLICATION = "PUBLICATION"
+
+
+class SourceQuality(StrEnum):
+    PRIMARY = "PRIMARY"
+    HIGH_SECONDARY = "HIGH_SECONDARY"
+    SECONDARY = "SECONDARY"
+
+
+class Confidence(StrEnum):
+    """Kept separate on purpose -- they fail independently."""
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class HistoricalEvidence(StrEnum):
+    """Whether Tradabot has measured what comparable events did.
+
+    ``NOT_ESTABLISHED`` is the only value this phase can produce, and the enum
+    exists so that stays true by construction rather than by discipline. An
+    event study over these event kinds does not exist; the scanner's
+    ``signal_outcomes`` are a different event definition entirely and must not
+    be borrowed as evidence for SEC-event effects.
+    """
+
+    NOT_ESTABLISHED = "NOT_ESTABLISHED"
+    MEASURED = "MEASURED"
+
+
+class MaterialityContext(StrEnum):
+    """Why an event's magnitude was or was not put in proportion."""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    """The event kind carries no numeric magnitude to contextualise."""
+    NO_ESTABLISHED_AMOUNT = "NO_ESTABLISHED_AMOUNT"
+    """The default in this phase. Filing *metadata* never carries an amount,
+    and reading one out of the document text would be the semantic extraction
+    this phase excludes. A dollar figure scraped from prose is not the event's
+    magnitude just because it is the largest number on the page."""
+    UNAVAILABLE_CURRENCY_MISMATCH = "UNAVAILABLE_CURRENCY_MISMATCH"
+    """An amount exists but the company reports in another currency, and
+    Tradabot performs no conversion -- the Phase 13 rule, unchanged."""
+    UNAVAILABLE_NO_FUNDAMENTALS = "UNAVAILABLE_NO_FUNDAMENTALS"
+    COMPUTED = "COMPUTED"
+
+
+class Materiality(StrEnum):
+    """How much attention the event warrants. **Never a direction.**
+
+    Deliberately the same four bands :mod:`app.monitoring.schemas` already
+    uses, so one vocabulary describes attention across the whole system. There
+    is no GOOD, BAD, BULLISH or BEARISH member and no field to put one in: a
+    restatement is CRITICAL because the form's own semantics say the previously
+    issued statements cannot be relied upon, not because it is bad news.
+    """
+
+    ROUTINE = "ROUTINE"
+    NOTABLE = "NOTABLE"
+    SIGNIFICANT = "SIGNIFICANT"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceReference:
+    """Where in the primary source the event can be checked.
+
+    A pointer, not a copy. The document stays at SEC; what is retained is
+    enough to fetch it again and to prove the retained copy would be the same
+    one -- URL, the document's role in the filing, and a content hash.
+    """
+
+    document: str
+    """Filename within the accession, e.g. ``nvda-20260826.htm``."""
+    url: str
+    role: str
+    """``PRIMARY`` for the filing document, or the exhibit type where known."""
+    content_sha256: str | None = None
+    byte_size: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "document": self.document,
+            "url": self.url,
+            "role": self.role,
+            "content_sha256": self.content_sha256,
+            "byte_size": self.byte_size,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchEvent:
+    """One classified occurrence, traceable to the document that establishes it."""
+
+    event_id: str
+    company_id: int
+    company_key: str
+    cik: str
+    scope: EventScope
+    event_kind: EventKind
+
+    published_at: str
+    """When the source made it public. SEC ``acceptanceDateTime``, to the
+    second. Never the filing date, which is a calendar day."""
+    fetched_at: str
+    """When Tradabot retrieved it. Never confused with either of the others:
+    it says when we learned, not when it happened or when it was public."""
+    occurred_at: str | None = None
+    """When the event happened, when the source says so. SEC ``reportDate`` --
+    the 8-K cover page's "date of earliest event reported". ``None`` when the
+    filing carries none, and never invented from the filing date."""
+
+    source_type: SourceType = SourceType.REGULATOR
+    source_quality: SourceQuality = SourceQuality.PRIMARY
+    source_url: str = ""
+    source_document_id: str = ""
+    source_hash: str = ""
+
+    form: str = ""
+    accession: str = ""
+    item_codes: tuple[str, ...] = ()
+    """Every item code on the filing, not only the one that produced this
+    event. Kept whole so the classification can always be re-derived."""
+    classifying_item: str | None = None
+    """The single item code this event was classified from."""
+
+    title: str | None = None
+    fact_summary: str = ""
+    evidence: tuple[EvidenceReference, ...] = ()
+
+    materiality: Materiality = Materiality.ROUTINE
+    materiality_context: MaterialityContext = MaterialityContext.NOT_APPLICABLE
+    materiality_detail: str | None = None
+
+    source_confidence: Confidence = Confidence.HIGH
+    extraction_confidence: Confidence = Confidence.HIGH
+
+    interpretation: None = None
+    """Structurally absent in Phase 15.0. Typed ``None`` rather than
+    ``str | None`` so that writing one is a type error, not a judgement call."""
+    historical_evidence: HistoricalEvidence = HistoricalEvidence.NOT_ESTABLISHED
+
+    supersedes_event_id: str | None = None
+    amends_accession: str | None = None
+    """The accession this filing amends, when the form marks it an amendment.
+    Recorded separately from ``supersedes_event_id`` because knowing a filing
+    is an amendment is not the same as knowing which event it supersedes."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "company_id": self.company_id,
+            "company_key": self.company_key,
+            "cik": self.cik,
+            "scope": str(self.scope),
+            "event_kind": str(self.event_kind),
+            "occurred_at": self.occurred_at,
+            "published_at": self.published_at,
+            "fetched_at": self.fetched_at,
+            "source_type": str(self.source_type),
+            "source_quality": str(self.source_quality),
+            "source_url": self.source_url,
+            "source_document_id": self.source_document_id,
+            "source_hash": self.source_hash,
+            "form": self.form,
+            "accession": self.accession,
+            "item_codes": list(self.item_codes),
+            "classifying_item": self.classifying_item,
+            "title": self.title,
+            "fact_summary": self.fact_summary,
+            "evidence": [e.as_dict() for e in self.evidence],
+            "materiality": str(self.materiality),
+            "materiality_context": str(self.materiality_context),
+            "materiality_detail": self.materiality_detail,
+            "source_confidence": str(self.source_confidence),
+            "extraction_confidence": str(self.extraction_confidence),
+            "interpretation": None,
+            "historical_evidence": str(self.historical_evidence),
+            "supersedes_event_id": self.supersedes_event_id,
+            "amends_accession": self.amends_accession,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantinedFiling:
+    """A filing that could not be attached to a company, kept rather than dropped.
+
+    Phase 13 established that guessing an identity produces a confident report
+    about the wrong company. The same rule applies on ingestion: a CIK that
+    does not map to exactly one known company is quarantined with the reason,
+    never attached to the nearest match.
+    """
+
+    cik: str
+    accession: str
+    form: str
+    reason: str
+    fetched_at: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cik": self.cik,
+            "accession": self.accession,
+            "form": self.form,
+            "reason": self.reason,
+            "fetched_at": self.fetched_at,
+        }
