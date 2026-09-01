@@ -35,6 +35,7 @@ from typing import Any, Final
 from app.core.logging import get_logger
 from app.research_intelligence import context as magnitude_context
 from app.research_intelligence.freshness import MAX_WINDOW_DAYS, is_current
+from app.research_intelligence.ingest import HealthReport, health
 from app.research_intelligence.schemas import (
     ContextStatus,
     EventKind,
@@ -262,6 +263,11 @@ class CurrentDevelopments:
     """Current 10-K/10-Q/20-F/40-F filings. Counted, never listed -- their
     contents are the fundamentals section, not a development."""
     detail: str | None = None
+    ingestion: HealthReport | None = None
+    """Whether ingestion itself is current. Separate from every coverage state
+    above, because "this company filed nothing recently" and "we stopped
+    looking three days ago" are opposite claims that produce an identical
+    empty section."""
     historical_evidence: HistoricalEvidence = HistoricalEvidence.NOT_ESTABLISHED
     """Fixed. No event study over these event kinds exists, so no displayed
     development may carry a claim about what comparable filings did next."""
@@ -280,6 +286,7 @@ class CurrentDevelopments:
             "unclassified_current": self.unclassified_current,
             "periodic_current": self.periodic_current,
             "detail": self.detail,
+            "ingestion": self.ingestion.as_dict() if self.ingestion else None,
             "historical_evidence": str(self.historical_evidence),
         }
 
@@ -355,10 +362,12 @@ class CurrentDevelopmentsService:
                 as_of=as_of,
                 detail="the research store has not been built",
             )
+        state = health(self._store)
         if company_id is None:
             return CurrentDevelopments(
                 status=CoverageStatus.NO_COVERAGE,
                 as_of=as_of,
+                ingestion=state,
                 detail="this listing has no resolved company identity",
             )
         try:
@@ -374,6 +383,7 @@ class CurrentDevelopmentsService:
                 status=CoverageStatus.UNAVAILABLE,
                 as_of=as_of,
                 company_id=company_id,
+                ingestion=state,
                 detail="the research store could not be read",
             )
         return self._report(
@@ -383,6 +393,7 @@ class CurrentDevelopmentsService:
             as_of=as_of,
             company_key=company_key,
             ingested=bool(known) or self._store.has_company(company_id),
+            ingestion=state,
         )
 
     # ------------------------------------------------------------- internals
@@ -395,12 +406,14 @@ class CurrentDevelopmentsService:
         as_of: str,
         company_key: str | None,
         ingested: bool,
+        ingestion: HealthReport,
     ) -> CurrentDevelopments:
         if not ingested:
             return CurrentDevelopments(
                 status=CoverageStatus.NO_COVERAGE,
                 as_of=as_of,
                 company_id=company_id,
+                ingestion=ingestion,
                 detail="Tradabot has not ingested SEC filings for this company",
             )
 
@@ -420,6 +433,7 @@ class CurrentDevelopmentsService:
                 company_id=company_id,
                 unclassified_current=unclassified,
                 periodic_current=periodic,
+                ingestion=ingestion,
                 detail=_no_events_detail(status, known, periodic=periodic),
             )
 
@@ -433,6 +447,7 @@ class CurrentDevelopmentsService:
             suppressed=len(groups) - len(selected),
             unclassified_current=unclassified,
             periodic_current=periodic,
+            ingestion=ingestion,
         )
 
     def _group(

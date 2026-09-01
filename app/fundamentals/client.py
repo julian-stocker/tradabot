@@ -34,6 +34,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from datetime import date
 from typing import Any, Final
 
 from app.core.logging import get_logger
@@ -45,6 +46,18 @@ COMPANYFACTS_URL: Final = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:01
 SUBMISSIONS_URL: Final = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 SUBMISSIONS_FILE_URL: Final = "https://data.sec.gov/submissions/{name}"
 ARCHIVE_PREFIX: Final = "https://www.sec.gov/Archives/edgar/data/"
+DAILY_INDEX_URL: Final = (
+    "https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{day}.idx"
+)
+"""EDGAR's own daily dissemination index -- every filing accepted on one day.
+
+A documented archive path, and the reason recurring ingestion is affordable:
+one 540 KB request lists the day's ~6,000 filings, against 989 submissions
+requests to ask each company individually whether anything happened. It is
+kept on a **separate** method from :meth:`EdgarClient.archive_document`
+because the two have different trust stories -- this path is built from a
+date this code chose, while an archive document path comes from filing
+metadata and must stay confined to its accession directory."""
 """The only prefix :meth:`EdgarClient.archive_document` will fetch.
 
 An allowlist rather than a validation: the documents this client retrieves
@@ -173,6 +186,20 @@ class EdgarClient:
             msg = "refused: not an EDGAR archive URL"
             raise EdgarUnavailableError(msg)
         return self._get_bytes(url)
+
+    def daily_index(self, day: date) -> bytes:
+        """Every filing EDGAR accepted on ``day``, as the raw index.
+
+        Raises:
+            EdgarUnavailableError: on a weekend, a holiday, or a day whose index
+                SEC has not published yet -- all of which return 403 or 404 and
+                are ordinary outcomes rather than faults.
+        """
+        url = DAILY_INDEX_URL.format(
+            year=day.year, quarter=(day.month - 1) // 3 + 1, day=day.strftime("%Y%m%d")
+        )
+        raw, _ = self._get_bytes(url)
+        return raw
 
     def _get_bytes(self, url: str) -> tuple[bytes, str]:
         last_error = "unknown"

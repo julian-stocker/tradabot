@@ -454,14 +454,36 @@ def _developments_field(check: StockCheck) -> str | None:
             )
         if status == "NO_CURRENT_EVENTS" and report.periodic_current:
             return f"No recent event filing — {report.detail}."
-        return _DEVELOPMENT_COVERAGE.get(status, "Unavailable.")
+        base = _DEVELOPMENT_COVERAGE.get(status, "Unavailable.")
+        note = _stale_note(report)
+        return f"{base}\n{note}" if note else base
 
-    blocks = [_development(d) for d in report.developments]
+    blocks = [_stale_note(report), *(_development(d) for d in report.developments)]
+    blocks = [b for b in blocks if b]
     # Stated once for the section rather than once per filing: it is true of
     # every event kind here, and repeating it three times would make the one
     # thing the section refuses to claim its most prominent feature.
     footers = [_more(report), "_Historical price evidence: not established for these event types._"]
     return _within_limit(blocks, [f for f in footers if f])
+
+
+def _stale_note(report: Any) -> str:
+    """One line when ingestion itself has fallen behind, and nothing otherwise.
+
+    A quiet company and a scheduler that stopped running produce the same empty
+    section, and only one of them is a fact about the company. The events
+    already stored stay exactly as they are -- this adds a caveat, it does not
+    withdraw anything.
+    """
+    state = getattr(report, "ingestion", None)
+    if state is None or state.current:
+        return ""
+    if str(state.status) == "NEVER_RUN":
+        return "_Automatic SEC ingestion has not run; coverage may be incomplete._"
+    days = (state.age_hours or 0) / 24
+    return (
+        f"_SEC ingestion last succeeded {days:.0f} day(s) ago; newer filings may not be included._"
+    )
 
 
 def _more(report: Any) -> str:

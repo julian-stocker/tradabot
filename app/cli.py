@@ -2361,6 +2361,72 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     )
 
 
+def _ingest_research(settings: Settings, args: argparse.Namespace) -> int:
+    """Keep the SEC research store current. Reads SEC; never trades.
+
+    Exits 0 on a degraded run and on a skipped one. This runs from the
+    scheduler, where a non-zero exit makes launchd treat one company's timeout
+    as a broken job -- and the run's own health state, not its exit code, is
+    what tells anyone coverage is drifting.
+    """
+    import json as _json  # noqa: PLC0415
+
+    from app.fundamentals.client import EdgarClient  # noqa: PLC0415
+    from app.instruments.registry import load as load_registry  # noqa: PLC0415
+    from app.research_intelligence import ingest, universe  # noqa: PLC0415
+    from app.research_intelligence.sec import SecFilingSource  # noqa: PLC0415
+    from app.research_intelligence.service import EvidenceService  # noqa: PLC0415
+    from app.research_intelligence.store import EventStore  # noqa: PLC0415
+
+    registry = load_registry(_database_file(settings))
+    eligible = universe.build(registry.all_candidates())
+    targets = None
+    if args.company:
+        found = registry.resolve(args.company)
+        listing = found.listing
+        if listing is None or not listing.cik:
+            # No fuzzy matching and no raw CIK override: an operator naming an
+            # ambiguous ticker gets the ambiguity, not a guess at which company
+            # to spend a night's ingestion on.
+            print(f"cannot resolve {args.company!r} to one SEC registrant: {found.resolution}")
+            return 1
+        targets = [t for t in eligible.targets if t.cik == str(listing.cik).zfill(10)]
+        if not targets:
+            print(f"{args.company} resolves to a listing outside the research universe")
+            return 1
+
+    store = EventStore()
+    client = EdgarClient()
+    ingestor = ingest.IncrementalResearchIngestor(
+        universe=eligible,
+        source=SecFilingSource(client),
+        client=client,
+        store=store,
+        evidence=EvidenceService(client=client, store=store),
+        dry_run=args.dry_run,
+    )
+    mode = ingest.IngestionMode.SWEEP if (args.bootstrap or targets) else ingest.IngestionMode.INDEX
+    since = None
+    if args.bootstrap:
+        since = (datetime.now(UTC) - timedelta(days=args.lookback)).date().isoformat()
+
+    try:
+        with ingest.single_run():
+            run = ingestor.run(mode=mode, companies=targets, since=since, limit=args.limit)
+    except ingest.AlreadyRunningError:
+        print(_json.dumps({"status": str(ingest.RunStatus.SKIPPED_ALREADY_RUNNING)}))
+        return 0
+
+    # Health is printed with every run so the scheduler log carries it. Alert
+    # wiring is deliberately deferred: `ops status` reads the trading database
+    # and the research store is a separate, rebuildable one, so consuming this
+    # there is its own change rather than a side effect of this phase.
+    summary = run.as_dict()
+    summary["health"] = ingest.health(store).as_dict()
+    print(_json.dumps(summary, indent=1 if args.verbose else None))
+    return 0
+
+
 def _heartbeat(_settings: Settings, args: argparse.Namespace) -> int:
     """Ping the external watchdog. Never fails the caller.
 
@@ -2708,6 +2774,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "monitor": _monitor,
     "publish": _publish,
     "heartbeat": _heartbeat,
+    "ingest-research": _ingest_research,
     "discord-bot": _discord_bot,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
@@ -2872,8 +2939,40 @@ def _add_publish_parser(sub: argparse._SubParsersAction) -> None:  # type: ignor
             )
 
 
+def _add_research_ingestion_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Recurring SEC research ingestion."""
+    ingest = sub.add_parser(
+        "ingest-research",
+        help="Update the SEC research store from documented EDGAR endpoints",
+    )
+    ingest.add_argument(
+        "--company",
+        default=None,
+        help="Ingest one company, resolved through the instrument registry",
+    )
+    ingest.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Poll every eligible registrant directly instead of the daily index",
+    )
+    ingest.add_argument(
+        "--lookback",
+        type=int,
+        default=365,
+        help="Bootstrap only: how many days of filings to ingest (default 365)",
+    )
+    ingest.add_argument("--limit", type=int, default=None, help="Stop after N companies")
+    ingest.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be ingested. Writes nothing and advances nothing.",
+    )
+    ingest.add_argument("--verbose", action="store_true", help="Pretty-print the run summary")
+
+
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Portfolio and operations commands."""
+    _add_research_ingestion_parser(sub)
     advisor = sub.add_parser(
         "advisor", help="Factual read-only company report (never a recommendation)"
     )

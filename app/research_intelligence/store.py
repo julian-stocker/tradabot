@@ -141,6 +141,54 @@ CREATE INDEX IF NOT EXISTS ix_facts_event   ON research_facts (event_id);
 CREATE INDEX IF NOT EXISTS ix_facts_company ON research_facts (company_id, metric);
 CREATE INDEX IF NOT EXISTS ix_facts_doc     ON research_facts (document_id);
 
+CREATE TABLE IF NOT EXISTS ingestion_checkpoints (
+    company_id           INTEGER PRIMARY KEY,
+    cik                  TEXT NOT NULL,
+    last_attempt_at      TEXT,
+    last_success_at      TEXT,
+    last_seen_accession  TEXT,
+    last_seen_published  TEXT,
+    last_error           TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    next_eligible_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_checkpoint_cik ON ingestion_checkpoints (cik);
+
+CREATE TABLE IF NOT EXISTS accession_state (
+    accession   TEXT PRIMARY KEY,
+    company_id  INTEGER NOT NULL,
+    cik         TEXT NOT NULL,
+    form        TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_accession_company ON accession_state (company_id, state);
+CREATE INDEX IF NOT EXISTS ix_accession_state   ON accession_state (state);
+
+CREATE TABLE IF NOT EXISTS ingestion_runs (
+    run_id                TEXT PRIMARY KEY,
+    started_at            TEXT NOT NULL,
+    finished_at           TEXT,
+    status                TEXT NOT NULL,
+    mode                  TEXT NOT NULL,
+    companies_attempted   INTEGER NOT NULL DEFAULT 0,
+    companies_succeeded   INTEGER NOT NULL DEFAULT 0,
+    companies_failed      INTEGER NOT NULL DEFAULT 0,
+    companies_unchanged   INTEGER NOT NULL DEFAULT 0,
+    accessions_discovered INTEGER NOT NULL DEFAULT 0,
+    events_created        INTEGER NOT NULL DEFAULT 0,
+    documents_created     INTEGER NOT NULL DEFAULT 0,
+    facts_created         INTEGER NOT NULL DEFAULT 0,
+    network_requests      INTEGER NOT NULL DEFAULT 0,
+    retries               INTEGER NOT NULL DEFAULT 0,
+    duration_seconds      REAL NOT NULL DEFAULT 0,
+    cursor_date           TEXT,
+    detail                TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_runs_started ON ingestion_runs (started_at);
+
 CREATE TABLE IF NOT EXISTS quarantined_filings (
     cik        TEXT NOT NULL,
     accession  TEXT NOT NULL,
@@ -365,6 +413,16 @@ class EventStore:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._memory = sqlite3.connect(":memory:") if self._path == ":memory:" else None
         with self._connect() as connection:
+            if self._memory is None:
+                # Write-ahead logging, for exactly one reason: a `/check` read
+                # must not queue behind a universe-wide ingestion write. In
+                # SQLite's default rollback journal a writer blocks every
+                # reader for the length of its transaction, which for a
+                # thousand-company run would mean a Discord card waiting on SEC.
+                # WAL lets one writer and many readers proceed at once.
+                connection.execute("PRAGMA journal_mode=WAL")
+                # Wait rather than fail if a write *is* briefly in flight.
+                connection.execute("PRAGMA busy_timeout=5000")
             connection.executescript(_SCHEMA)
 
     @classmethod
@@ -386,7 +444,9 @@ class EventStore:
             # An in-memory database vanishes when its connection closes, so the
             # test store keeps one open and hands out a no-op context manager.
             return _Keep(self._memory)
-        return closing(sqlite3.connect(self._path))
+        connection = sqlite3.connect(self._path, timeout=5.0)
+        connection.execute("PRAGMA busy_timeout=5000")
+        return closing(connection)
 
     # ------------------------------------------------------------------ writes
     def upsert(self, events: Sequence[ResearchEvent]) -> int:
@@ -622,6 +682,159 @@ class EventStore:
     def count_facts(self) -> int:
         with self._connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM research_facts").fetchone()[0])
+
+    # ------------------------------------------------------------ ingestion
+    def checkpoint(self, company_id: int) -> dict[str, Any] | None:
+        """Durable ingestion state for one company, keyed by company identity."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM ingestion_checkpoints WHERE company_id = ?", (company_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_attempt(self, company_id: int, cik: str, when: str) -> None:
+        """Note that a company was tried. **Never touches ``last_success_at``.**
+
+        Attempt and success are separate columns because a run that fails must
+        not look like a run that worked: if one timestamp served both, a company
+        failing every night would report itself freshly ingested every night.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO ingestion_checkpoints (company_id, cik, last_attempt_at) "
+                "VALUES (?,?,?) ON CONFLICT(company_id) DO UPDATE SET "
+                "last_attempt_at = excluded.last_attempt_at, cik = excluded.cik",
+                (company_id, cik, when),
+            )
+            connection.commit()
+
+    def record_success(
+        self,
+        company_id: int,
+        *,
+        when: str,
+        last_accession: str | None,
+        last_published: str | None,
+    ) -> None:
+        """Advance the checkpoint. Called only once everything is persisted."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE ingestion_checkpoints SET last_success_at = ?, "
+                "last_seen_accession = COALESCE(?, last_seen_accession), "
+                "last_seen_published = COALESCE(?, last_seen_published), "
+                "last_error = NULL, consecutive_failures = 0 WHERE company_id = ?",
+                (when, last_accession, last_published, company_id),
+            )
+            connection.commit()
+
+    def record_failure(self, company_id: int, *, reason: str, next_eligible: str) -> None:
+        """Record a failure and back the company off. The checkpoint does not move."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE ingestion_checkpoints SET last_error = ?, "
+                "consecutive_failures = consecutive_failures + 1, next_eligible_at = ? "
+                "WHERE company_id = ?",
+                (reason, next_eligible, company_id),
+            )
+            connection.commit()
+
+    def accession_states(self, accessions: Sequence[str]) -> dict[str, dict[str, Any]]:
+        if not accessions:
+            return {}
+        marks = ",".join("?" * len(accessions))
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"SELECT * FROM accession_state WHERE accession IN ({marks})",
+                tuple(accessions),
+            ).fetchall()
+        return {r["accession"]: dict(r) for r in rows}
+
+    def set_accession_state(
+        self,
+        accession: str,
+        *,
+        company_id: int,
+        cik: str,
+        form: str,
+        state: str,
+        when: str,
+        detail: str | None = None,
+    ) -> None:
+        """Where one filing has got to. Attempts accumulate across runs."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO accession_state "
+                "(accession, company_id, cik, form, state, attempts, detail, updated_at) "
+                "VALUES (?,?,?,?,?,1,?,?) ON CONFLICT(accession) DO UPDATE SET "
+                "state = excluded.state, detail = excluded.detail, "
+                "updated_at = excluded.updated_at, attempts = accession_state.attempts + 1",
+                (accession, company_id, cik, form, state, detail, when),
+            )
+            connection.commit()
+
+    def retryable_accessions(self, company_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Filings whose deterministic processing is not finished.
+
+        This is what makes a partial failure recoverable rather than permanent:
+        the event is already stored and its accession is already known, so a
+        naive "have I seen this accession" check would skip it forever.
+        """
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM accession_state WHERE company_id = ? AND state IN "
+                "('EVENTS_STORED','EVIDENCE_PARTIAL','RETRYABLE_FAILURE') "
+                "ORDER BY updated_at LIMIT ?",
+                (company_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def unfinished_companies(self, *, limit: int = 25) -> list[int]:
+        """Companies holding a filing whose processing never finished.
+
+        The other half of incremental detection. A filing whose evidence fetch
+        died is *known* but not *done*, and without this a company that files
+        nothing further would never be revisited to complete it.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT company_id FROM accession_state WHERE state IN "
+                "('EVENTS_STORED','EVIDENCE_PARTIAL','RETRYABLE_FAILURE') "
+                "ORDER BY updated_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def start_run(self, run_id: str, *, started_at: str, mode: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO ingestion_runs (run_id, started_at, status, mode) "
+                "VALUES (?,?,?,?)",
+                (run_id, started_at, "RUNNING", mode),
+            )
+            connection.commit()
+
+    def finish_run(self, run_id: str, summary: dict[str, Any]) -> None:
+        columns = ",".join(f"{k} = ?" for k in summary)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE ingestion_runs SET {columns} WHERE run_id = ?",
+                (*summary.values(), run_id),
+            )
+            connection.commit()
+
+    def last_run(self, *, status: str | None = None) -> dict[str, Any] | None:
+        clause = "WHERE status = ?" if status else ""
+        params = (status,) if status else ()
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                f"SELECT * FROM ingestion_runs {clause} ORDER BY started_at DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return dict(row) if row else None
 
     def size_bytes(self) -> int:
         if self._path == ":memory:":

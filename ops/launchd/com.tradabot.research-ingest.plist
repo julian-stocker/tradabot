@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tradabot.research-ingest</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/julianstocker/Documents/tradabot/.venv/bin/python</string>
+		<string>-m</string>
+		<string>app.cli</string>
+		<string>ingest-research</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/julianstocker/Documents/tradabot/logs/research-ingest.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/julianstocker/Documents/tradabot/logs/research-ingest.log</string>
+	<key>StartInterval</key>
+	<integer>14400</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/julianstocker/Documents/tradabot</string>
+</dict>
+</plist>
