@@ -195,6 +195,18 @@ class EvidenceReference:
     """``PRIMARY`` for the filing document, or the exhibit type where known."""
     content_sha256: str | None = None
     byte_size: int | None = None
+    text_start: int | None = None
+    """Character offset into the *normalised* text -- see
+    :mod:`app.research_intelligence.content`, whose normalisation is fixed and
+    version-stamped precisely so these offsets keep meaning the same words."""
+    text_end: int | None = None
+    evidence_text: str | None = None
+    """The cited sentence, stored verbatim.
+
+    Kept as well as the offsets, not instead of them: the offsets locate the
+    claim in the document, and the text lets a reader check it without
+    refetching. If SEC ever changed the document, the mismatch is visible
+    rather than silent."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -203,6 +215,9 @@ class EvidenceReference:
             "role": self.role,
             "content_sha256": self.content_sha256,
             "byte_size": self.byte_size,
+            "text_start": self.text_start,
+            "text_end": self.text_end,
+            "evidence_text": self.evidence_text,
         }
 
 
@@ -324,4 +339,212 @@ class QuarantinedFiling:
             "form": self.form,
             "reason": self.reason,
             "fetched_at": self.fetched_at,
+        }
+
+
+class DocumentRole(StrEnum):
+    """What a document is within its filing, from the SEC exhibit type."""
+
+    PRIMARY = "PRIMARY"
+    EXHIBIT = "EXHIBIT"
+    XBRL = "XBRL"
+    GRAPHIC = "GRAPHIC"
+    OTHER = "OTHER"
+
+
+class EvidenceStatus(StrEnum):
+    """Why evidence was or was not obtained. Specific, never "insufficient data"."""
+
+    OK = "OK"
+    NO_RELEVANT_EXHIBIT = "NO_RELEVANT_EXHIBIT"
+    AMBIGUOUS_DOCUMENT = "AMBIGUOUS_DOCUMENT"
+    """Several documents could support the event and metadata does not say
+    which. Refused rather than picked -- the same rule identity resolution
+    applies to companies."""
+    UNSUPPORTED_CONTENT_TYPE = "UNSUPPORTED_CONTENT_TYPE"
+    CONTENT_FETCH_FAILED = "CONTENT_FETCH_FAILED"
+    CHANGED_SOURCE_CONTENT = "CHANGED_SOURCE_CONTENT"
+    """The URL returned different bytes than last time. SEC archive documents
+    are expected to be immutable; when one is not, the prior provenance is kept
+    and the change is recorded rather than overwritten."""
+
+
+class FactStatus(StrEnum):
+    """Why a numeric fact was or was not emitted."""
+
+    OK = "OK"
+    NO_STRUCTURED_FACT = "NO_STRUCTURED_FACT"
+    AMBIGUOUS_METRIC = "AMBIGUOUS_METRIC"
+    """More than one metric label, or a GAAP/non-GAAP pair, in the same
+    sentence. "earnings per diluted share were $2.46 and $2.22, respectively"
+    names two bases and two values; choosing one would be a coin toss."""
+    AMBIGUOUS_PERIOD = "AMBIGUOUS_PERIOD"
+    """No explicit period, or more than one. A press-release table carrying
+    "Three Months Ended" beside "Six Months Ended" is the canonical case."""
+    AMBIGUOUS_UNIT = "AMBIGUOUS_UNIT"
+    AMBIGUOUS_VALUE = "AMBIGUOUS_VALUE"
+    UNKNOWN_CURRENCY = "UNKNOWN_CURRENCY"
+    NON_GAAP_BASIS = "NON_GAAP_BASIS"
+    """The sentence reports a non-GAAP measure. Tradabot's canonical history is
+    as-reported GAAP, so a non-GAAP figure is not comparable to it and is not
+    emitted rather than being silently mixed in."""
+
+
+class ContextStatus(StrEnum):
+    """Why a magnitude was or was not put in proportion."""
+
+    COMPUTED = "COMPUTED"
+    NO_ESTABLISHED_AMOUNT = "NO_ESTABLISHED_AMOUNT"
+    CURRENCY_MISMATCH = "CURRENCY_MISMATCH"
+    UNKNOWN_CURRENCY = "UNKNOWN_CURRENCY"
+    NO_PIT_COMPARATOR = "NO_PIT_COMPARATOR"
+    """No canonical figure was on file as of the event's publication. Using a
+    later filing's number would answer the question with information nobody
+    had at the time."""
+    INCOMPATIBLE_PERIOD = "INCOMPATIBLE_PERIOD"
+
+
+class FiscalPeriod(StrEnum):
+    """The period shape a figure describes. Never inferred from position."""
+
+    QUARTER = "QUARTER"
+    YEAR = "YEAR"
+    YEAR_TO_DATE = "YEAR_TO_DATE"
+    TRAILING_TWELVE_MONTHS = "TRAILING_TWELVE_MONTHS"
+    INSTANT = "INSTANT"
+
+
+UNKNOWN_CURRENCY = "UNKNOWN"
+"""Currency when the document does not establish one. Never defaulted to USD
+merely because the filing is with the SEC -- foreign private issuers report in
+their own currency and file here."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchDocument:
+    """One SEC-hosted document, described rather than mirrored.
+
+    Separate from :class:`ResearchEvent` because the relationship is many to
+    many: one 8-K's press release supports every event that filing produced,
+    and one event may cite the primary document and an exhibit. Making the
+    exhibit an event would have duplicated the filing once per attachment.
+    """
+
+    document_id: str
+    company_id: int
+    cik: str
+    accession: str
+    document_type: str
+    """The SEC exhibit type verbatim -- ``EX-99.1``, ``8-K``, ``EX-101.SCH``."""
+    role: DocumentRole
+    filename: str
+    sequence: int
+    description: str | None
+    source_url: str
+    published_at: str
+    fetched_at: str | None = None
+    content_type: str | None = None
+    content_hash: str | None = None
+    text_length: int | None = None
+    raw_size: int | None = None
+    status: EvidenceStatus = EvidenceStatus.OK
+    extraction_version: str = ""
+
+    @property
+    def retrieved(self) -> bool:
+        return self.content_hash is not None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "document_id": self.document_id,
+            "company_id": self.company_id,
+            "cik": self.cik,
+            "accession": self.accession,
+            "document_type": self.document_type,
+            "role": str(self.role),
+            "filename": self.filename,
+            "sequence": self.sequence,
+            "description": self.description,
+            "source_url": self.source_url,
+            "published_at": self.published_at,
+            "fetched_at": self.fetched_at,
+            "content_type": self.content_type,
+            "content_hash": self.content_hash,
+            "text_length": self.text_length,
+            "raw_size": self.raw_size,
+            "status": str(self.status),
+            "extraction_version": self.extraction_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchFact:
+    """One figure a disclosure document explicitly stated.
+
+    **Not a canonical fundamental.** :class:`~app.advisor.facts.FactStore`
+    remains the authority on what a company's financial history is; this
+    records what one document said on one day, which is a different question
+    and answerable from the document alone. Nothing here is written back into
+    canonical fundamentals.
+    """
+
+    fact_id: str
+    event_id: str
+    company_id: int
+    metric: str
+    value: float
+    unit: str
+    currency: str = UNKNOWN_CURRENCY
+    fiscal_period: FiscalPeriod | None = None
+    period_start: str | None = None
+    period_end: str | None = None
+    instant: str | None = None
+    basis: str = "GAAP"
+    document_id: str = ""
+    evidence: EvidenceReference | None = None
+    extraction_method: str = ""
+    extraction_confidence: Confidence = Confidence.HIGH
+    extraction_version: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "fact_id": self.fact_id,
+            "event_id": self.event_id,
+            "company_id": self.company_id,
+            "metric": self.metric,
+            "value": self.value,
+            "unit": self.unit,
+            "currency": self.currency,
+            "fiscal_period": str(self.fiscal_period) if self.fiscal_period else None,
+            "period_start": self.period_start,
+            "period_end": self.period_end,
+            "instant": self.instant,
+            "basis": self.basis,
+            "document_id": self.document_id,
+            "evidence": self.evidence.as_dict() if self.evidence else None,
+            "extraction_method": self.extraction_method,
+            "extraction_confidence": str(self.extraction_confidence),
+            "extraction_version": self.extraction_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MagnitudeContext:
+    """A figure placed against a canonical comparator, or the reason it was not."""
+
+    status: ContextStatus
+    metric: str | None = None
+    comparator: str | None = None
+    comparator_value: float | None = None
+    ratio: float | None = None
+    detail: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": str(self.status),
+            "metric": self.metric,
+            "comparator": self.comparator,
+            "comparator_value": self.comparator_value,
+            "ratio": self.ratio,
+            "detail": self.detail,
         }

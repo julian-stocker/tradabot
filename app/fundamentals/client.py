@@ -44,6 +44,14 @@ TICKERS_URL: Final = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL: Final = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 SUBMISSIONS_URL: Final = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 SUBMISSIONS_FILE_URL: Final = "https://data.sec.gov/submissions/{name}"
+ARCHIVE_PREFIX: Final = "https://www.sec.gov/Archives/edgar/data/"
+"""The only prefix :meth:`EdgarClient.archive_document` will fetch.
+
+An allowlist rather than a validation: the documents this client retrieves
+are named inside filing metadata, which is untrusted source content, so the
+destination is constrained by the code rather than by the document. A
+filename that tried to escape its accession directory -- or a full URL
+pointing anywhere else -- is refused before any socket is opened."""
 
 DEFAULT_USER_AGENT: Final = "tradabot research contact-via-repository"
 """Overridden with ``TRADABOT_SEC_USER_AGENT``. SEC asks that this identify the
@@ -149,6 +157,55 @@ class EdgarClient:
         this endpoint three times for three fields of the same document.
         """
         return self._get(SUBMISSIONS_URL.format(cik=cik))
+
+    def archive_document(self, url: str) -> tuple[bytes, str]:
+        """One document from the EDGAR archive, as bytes plus its content type.
+
+        Bytes rather than parsed JSON because these are filings: HTML, plain
+        text, occasionally XML. Hashing needs exactly what SEC served, so no
+        decoding happens here.
+
+        Raises:
+            EdgarUnavailableError: if the URL is outside :data:`ARCHIVE_PREFIX`,
+                or SEC could not be reached.
+        """
+        if not url.startswith(ARCHIVE_PREFIX) or ".." in url:
+            msg = "refused: not an EDGAR archive URL"
+            raise EdgarUnavailableError(msg)
+        return self._get_bytes(url)
+
+    def _get_bytes(self, url: str) -> tuple[bytes, str]:
+        last_error = "unknown"
+        for attempt in range(self._retries):
+            gap = _MIN_INTERVAL - (time.monotonic() - self._last)
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": self._agent,
+                    "Accept-Encoding": "gzip, deflate",
+                    "Accept": "*/*",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    raw = response.read()
+                    if response.headers.get("Content-Encoding") == "gzip":
+                        raw = gzip.decompress(raw)
+                    return raw, str(response.headers.get("Content-Type") or "")
+            except urllib.error.HTTPError as exc:
+                if exc.code == _NOT_FOUND:
+                    msg = "not found"
+                    raise EdgarUnavailableError(msg) from None
+                last_error = f"HTTP {exc.code}"
+                if exc.code not in _RETRY_STATUS:
+                    break
+            except Exception as exc:
+                last_error = type(exc).__name__
+            time.sleep(_MIN_INTERVAL * (2**attempt))
+        raise EdgarUnavailableError(last_error)
 
     def profile(self, cik: int) -> dict[str, str]:
         """Entity name and SIC classification for one filer.

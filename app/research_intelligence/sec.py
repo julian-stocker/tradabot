@@ -88,6 +88,20 @@ class FilingRecord:
         base = ARCHIVE_URL.format(cik=int(self.cik), accession=self.bare_accession)
         return f"{base}/{document}" if document else base
 
+    @property
+    def manifest_url(self) -> str:
+        """The filing's typed document manifest.
+
+        ``{accession}-index-headers.html`` -- 5.9 KB of SGML headers carrying
+        every document's type, sequence, filename and description. Measured
+        against the two alternatives in
+        :mod:`app.research_intelligence.documents`: ``index.json`` reports icon
+        filenames instead of exhibit types, and the full ``{accession}.txt``
+        submission is 802 KB for the same headers because SEC does not honour
+        HTTP Range.
+        """
+        return self.archive_url(f"{self.accession}-index-headers.html")
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "cik": self.cik,

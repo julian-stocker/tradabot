@@ -762,6 +762,10 @@ class TestStructuralBoundaries:
             "freshness.py",
             "identity.py",
             "sec.py",
+            "documents.py",
+            "content.py",
+            "facts.py",
+            "context.py",
         )
         for name in pure:
             body = (Path("app/research_intelligence") / name).read_text()

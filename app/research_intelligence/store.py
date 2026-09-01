@@ -36,14 +36,19 @@ from typing import Any
 from app.core.logging import get_logger
 from app.research_intelligence.schemas import (
     Confidence,
+    DocumentRole,
     EventKind,
     EventScope,
     EvidenceReference,
+    EvidenceStatus,
+    FiscalPeriod,
     HistoricalEvidence,
     Materiality,
     MaterialityContext,
     QuarantinedFiling,
+    ResearchDocument,
     ResearchEvent,
+    ResearchFact,
     SourceQuality,
     SourceType,
 )
@@ -89,6 +94,52 @@ CREATE INDEX IF NOT EXISTS ix_events_company ON research_events (company_id, pub
 CREATE INDEX IF NOT EXISTS ix_events_kind    ON research_events (event_kind, published_at);
 CREATE INDEX IF NOT EXISTS ix_events_pub     ON research_events (published_at);
 CREATE INDEX IF NOT EXISTS ix_events_acc     ON research_events (accession);
+
+CREATE TABLE IF NOT EXISTS research_documents (
+    document_id       TEXT PRIMARY KEY,
+    company_id        INTEGER NOT NULL,
+    cik               TEXT NOT NULL,
+    accession         TEXT NOT NULL,
+    document_type     TEXT NOT NULL,
+    role              TEXT NOT NULL,
+    filename          TEXT NOT NULL,
+    sequence          INTEGER NOT NULL,
+    description       TEXT,
+    source_url        TEXT NOT NULL,
+    published_at      TEXT NOT NULL,
+    fetched_at        TEXT,
+    content_type      TEXT,
+    content_hash      TEXT,
+    text_length       INTEGER,
+    raw_size          INTEGER,
+    status            TEXT NOT NULL,
+    extraction_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_docs_accession ON research_documents (accession);
+CREATE INDEX IF NOT EXISTS ix_docs_company   ON research_documents (company_id, published_at);
+
+CREATE TABLE IF NOT EXISTS research_facts (
+    fact_id           TEXT PRIMARY KEY,
+    event_id          TEXT NOT NULL,
+    company_id        INTEGER NOT NULL,
+    metric            TEXT NOT NULL,
+    value             REAL NOT NULL,
+    unit              TEXT NOT NULL,
+    currency          TEXT NOT NULL,
+    fiscal_period     TEXT,
+    period_start      TEXT,
+    period_end        TEXT,
+    instant           TEXT,
+    basis             TEXT NOT NULL,
+    document_id       TEXT NOT NULL,
+    evidence          TEXT NOT NULL,
+    extraction_method TEXT NOT NULL,
+    extraction_confidence TEXT NOT NULL,
+    extraction_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_facts_event   ON research_facts (event_id);
+CREATE INDEX IF NOT EXISTS ix_facts_company ON research_facts (company_id, metric);
+CREATE INDEX IF NOT EXISTS ix_facts_doc     ON research_facts (document_id);
 
 CREATE TABLE IF NOT EXISTS quarantined_filings (
     cik        TEXT NOT NULL,
@@ -201,6 +252,105 @@ def _event(row: sqlite3.Row) -> ResearchEvent:
     )
 
 
+_DOCUMENT_COLUMNS = (
+    "document_id",
+    "company_id",
+    "cik",
+    "accession",
+    "document_type",
+    "role",
+    "filename",
+    "sequence",
+    "description",
+    "source_url",
+    "published_at",
+    "fetched_at",
+    "content_type",
+    "content_hash",
+    "text_length",
+    "raw_size",
+    "status",
+    "extraction_version",
+)
+
+_FACT_COLUMNS = (
+    "fact_id",
+    "event_id",
+    "company_id",
+    "metric",
+    "value",
+    "unit",
+    "currency",
+    "fiscal_period",
+    "period_start",
+    "period_end",
+    "instant",
+    "basis",
+    "document_id",
+    "evidence",
+    "extraction_method",
+    "extraction_confidence",
+    "extraction_version",
+)
+
+
+def _document_row(document: ResearchDocument) -> tuple[Any, ...]:
+    data = document.as_dict()
+    return tuple(data[column] for column in _DOCUMENT_COLUMNS)
+
+
+def _document(row: sqlite3.Row) -> ResearchDocument:
+    return ResearchDocument(
+        document_id=row["document_id"],
+        company_id=row["company_id"],
+        cik=row["cik"],
+        accession=row["accession"],
+        document_type=row["document_type"],
+        role=DocumentRole(row["role"]),
+        filename=row["filename"],
+        sequence=row["sequence"],
+        description=row["description"],
+        source_url=row["source_url"],
+        published_at=row["published_at"],
+        fetched_at=row["fetched_at"],
+        content_type=row["content_type"],
+        content_hash=row["content_hash"],
+        text_length=row["text_length"],
+        raw_size=row["raw_size"],
+        status=EvidenceStatus(row["status"]),
+        extraction_version=row["extraction_version"],
+    )
+
+
+def _fact_row(fact: ResearchFact) -> tuple[Any, ...]:
+    data = fact.as_dict()
+    data["evidence"] = json.dumps(data["evidence"])
+    return tuple(data[column] for column in _FACT_COLUMNS)
+
+
+def _fact(row: sqlite3.Row) -> ResearchFact:
+    evidence = json.loads(row["evidence"])
+    return ResearchFact(
+        fact_id=row["fact_id"],
+        event_id=row["event_id"],
+        company_id=row["company_id"],
+        metric=row["metric"],
+        value=row["value"],
+        unit=row["unit"],
+        currency=row["currency"],
+        fiscal_period=FiscalPeriod(row["fiscal_period"]) if row["fiscal_period"] else None,
+        period_start=row["period_start"],
+        period_end=row["period_end"],
+        instant=row["instant"],
+        basis=row["basis"],
+        document_id=row["document_id"],
+        evidence=EvidenceReference(**evidence) if evidence else None,
+        extraction_method=row["extraction_method"],
+        extraction_confidence=Confidence(row["extraction_confidence"]),
+        extraction_version=row["extraction_version"],
+    )
+
+
 class EventStore:
     """Persistent, point-in-time research events.
 
@@ -269,6 +419,62 @@ class EventStore:
             )
             connection.commit()
 
+    def upsert_documents(self, documents: Sequence[ResearchDocument]) -> int:
+        """Record documents a filing lists, returning how many were new.
+
+        ``INSERT OR IGNORE``, and the choice matters: these rows come from the
+        manifest and carry no content hash. Replacing on conflict would let a
+        second manifest read wipe the retrieval state of a document already
+        fetched -- which would silently disable both the cache and the
+        changed-content check, because there would no longer be a prior hash to
+        compare against. Retrieval writes through :meth:`update_document`.
+        """
+        if not documents:
+            return 0
+        placeholders = ",".join("?" * len(_DOCUMENT_COLUMNS))
+        sql = (
+            f"INSERT OR IGNORE INTO research_documents ({','.join(_DOCUMENT_COLUMNS)}) "
+            f"VALUES ({placeholders})"
+        )
+        with self._connect() as connection:
+            before = connection.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0]
+            connection.executemany(sql, [_document_row(d) for d in documents])
+            connection.commit()
+            after = connection.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0]
+        return int(after - before)
+
+    def update_document(self, document: ResearchDocument) -> None:
+        """Write back a document that has been retrieved, or refused."""
+        placeholders = ",".join("?" * len(_DOCUMENT_COLUMNS))
+        with self._connect() as connection:
+            connection.execute(
+                f"INSERT OR REPLACE INTO research_documents "
+                f"({','.join(_DOCUMENT_COLUMNS)}) VALUES ({placeholders})",
+                _document_row(document),
+            )
+            connection.commit()
+
+    def upsert_facts(self, facts: Sequence[ResearchFact]) -> int:
+        """Store extracted facts, returning how many were new.
+
+        ``INSERT OR IGNORE``: identity already includes the extraction version,
+        so re-running the same parser over the same document writes nothing and
+        a *different* version writes alongside rather than over.
+        """
+        if not facts:
+            return 0
+        placeholders = ",".join("?" * len(_FACT_COLUMNS))
+        sql = (
+            f"INSERT OR IGNORE INTO research_facts ({','.join(_FACT_COLUMNS)}) "
+            f"VALUES ({placeholders})"
+        )
+        with self._connect() as connection:
+            before = connection.execute("SELECT COUNT(*) FROM research_facts").fetchone()[0]
+            connection.executemany(sql, [_fact_row(f) for f in facts])
+            connection.commit()
+            after = connection.execute("SELECT COUNT(*) FROM research_facts").fetchone()[0]
+        return int(after - before)
+
     # ------------------------------------------------------------------- reads
     def _query(self, where: str, params: Sequence[Any]) -> list[ResearchEvent]:
         with self._connect() as connection:
@@ -327,6 +533,66 @@ class EventStore:
             )
             for r in rows
         ]
+
+    def documents_for_accession(self, accession: str) -> list[ResearchDocument]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM research_documents WHERE accession = ? ORDER BY sequence",
+                (accession,),
+            ).fetchall()
+        return [_document(r) for r in rows]
+
+    def document(self, document_id: str) -> ResearchDocument | None:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM research_documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
+        return _document(row) if row else None
+
+    def facts_for_event(self, event_id: str) -> list[ResearchFact]:
+        return self._facts("event_id = ?", (event_id,))
+
+    def facts_for_company(self, company_id: int, *, as_of: str) -> list[ResearchFact]:
+        """Facts whose event was public at ``as_of``.
+
+        The point-in-time filter lives on the *event*, not the fact: a fact is
+        known exactly when the document that states it became public, and
+        joining through the event is what keeps that true rather than
+        approximately true.
+        """
+        return self._facts(
+            "event_id IN (SELECT event_id FROM research_events WHERE published_at <= ?)",
+            (as_of,),
+            extra="company_id = ?",
+            extra_params=(company_id,),
+        )
+
+    def _facts(
+        self,
+        where: str,
+        params: Sequence[Any],
+        *,
+        extra: str | None = None,
+        extra_params: Sequence[Any] = (),
+    ) -> list[ResearchFact]:
+        clause = f"{where} AND {extra}" if extra else where
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"SELECT * FROM research_facts WHERE {clause} ORDER BY metric, period_end",
+                (*params, *extra_params),
+            ).fetchall()
+        return [_fact(r) for r in rows]
+
+    def count_documents(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0])
+
+    def count_facts(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM research_facts").fetchone()[0])
 
     def size_bytes(self) -> int:
         if self._path == ":memory:":
