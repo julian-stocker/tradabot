@@ -74,6 +74,12 @@ class Resolution(StrEnum):
     """The lookup itself failed. Distinct from having no data."""
     MALFORMED_SYMBOL = "MALFORMED_SYMBOL"
     """The input is not shaped like a ticker at all."""
+    AMBIGUOUS_SYMBOL = "AMBIGUOUS_SYMBOL"
+    """The ticker names more than one listing. **Never resolved by choosing.**"""
+    FUNDAMENTALS_ONLY = "FUNDAMENTALS_ONLY"
+    """Filings available, no prices -- an ordinary state for a foreign listing."""
+    UNSUPPORTED_LISTING = "UNSUPPORTED_LISTING"
+    """A known listing with neither prices nor fundamentals."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +95,8 @@ class Resolved:
     """A near-miss worth mentioning. **Never acted upon** -- the user must issue
     the corrected command themselves."""
     detail: str | None = None
+    candidates: tuple[Any, ...] = ()
+    """Listings a bare ticker named, when it named several."""
 
     @property
     def analysable(self) -> bool:

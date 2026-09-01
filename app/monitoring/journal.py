@@ -63,8 +63,7 @@ class EventJournal:
                 handle.write("\n".join(lines) + "\n")
         return count
 
-    def read(self, *, since: date | None = None, until: date | None = None
-             ) -> list[dict[str, Any]]:
+    def read(self, *, since: date | None = None, until: date | None = None) -> list[dict[str, Any]]:
         """Every journalled event in a date range, oldest first.
 
         A malformed line is skipped rather than aborting the read: a digest that

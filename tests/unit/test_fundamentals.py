@@ -50,8 +50,13 @@ def companyfacts() -> dict[str, Any]:
     ]
     entries += [
         {"start": "2025-01-01", "end": "2025-03-31", "val": 999.0, "filed": "2025-04-20"},
-        {"start": "2025-01-01", "end": "2025-03-31", "val": None,
-         "filed": "2025-04-20", "accn": "0001-25-X"},
+        {
+            "start": "2025-01-01",
+            "end": "2025-03-31",
+            "val": None,
+            "filed": "2025-04-20",
+            "accn": "0001-25-X",
+        },
     ]
     return {
         "facts": {
@@ -63,8 +68,13 @@ def companyfacts() -> dict[str, Any]:
                 "EntityCommonStockSharesOutstanding": {
                     "units": {
                         "shares": [
-                            {"end": "2025-12-31", "val": 50.0, "filed": "2026-01-20",
-                             "accn": "0001-26-A", "form": "10-K"}
+                            {
+                                "end": "2025-12-31",
+                                "val": 50.0,
+                                "filed": "2026-01-20",
+                                "accn": "0001-26-A",
+                                "form": "10-K",
+                            }
                         ]
                     }
                 }
@@ -137,9 +147,7 @@ class TestExtraction:
 
     def test_instant_facts_with_no_period_start_do_not_break_the_schema(self) -> None:
         """Inference types the null column first and then fails on a real date."""
-        frame = _frame(
-            {**r, "symbol": "AAA", "cik": 111} for r in _extract(companyfacts(), {})
-        )
+        frame = _frame({**r, "symbol": "AAA", "cik": 111} for r in _extract(companyfacts(), {}))
         assert frame.schema["period_start"] == pl.String
         assert frame["period_start"].null_count() == 1
 

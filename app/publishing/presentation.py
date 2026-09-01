@@ -124,139 +124,188 @@ def _s(
 STATES: Final[dict[str, State]] = {
     # -- market regime ----------------------------------------------------
     "TRENDING_UP": _s(
-        "TRENDING_UP", "Trending up", Semantic.GOOD,
+        "TRENDING_UP",
+        "Trending up",
+        Semantic.GOOD,
         "The benchmark is trading above its long-term average. A description of "
         "the current trend, not a forecast.",
     ),
     "TRENDING_DOWN": _s(
-        "TRENDING_DOWN", "Trending down", Semantic.BAD,
+        "TRENDING_DOWN",
+        "Trending down",
+        Semantic.BAD,
         "The benchmark is trading below its long-term average. A description of "
         "the current trend, not a forecast.",
     ),
     "RANGE_BOUND": _s(
-        "RANGE_BOUND", "Range-bound", Semantic.NEUTRAL,
-        "The benchmark is close to its long-term average, with no clear trend "
-        "either way.",
+        "RANGE_BOUND",
+        "Range-bound",
+        Semantic.NEUTRAL,
+        "The benchmark is close to its long-term average, with no clear trend either way.",
     ),
     "INSUFFICIENT_HISTORY": _s(
-        "INSUFFICIENT_HISTORY", "Insufficient history", Semantic.UNAVAILABLE,
+        "INSUFFICIENT_HISTORY",
+        "Insufficient history",
+        Semantic.UNAVAILABLE,
         "There is not enough price history to describe a regime.",
     ),
     # -- market events ----------------------------------------------------
     "UNUSUAL_VOLUME": _s(
-        "UNUSUAL_VOLUME", "Unusual volume", Semantic.UNUSUAL,
-        "Traded far more than its recent typical volume. An activity signal, "
-        "not a direction.",
+        "UNUSUAL_VOLUME",
+        "Unusual volume",
+        Semantic.UNUSUAL,
+        "Traded far more than its recent typical volume. An activity signal, not a direction.",
     ),
     "UNUSUAL_VOLATILITY": _s(
-        "UNUSUAL_VOLATILITY", "Unusual volatility", Semantic.UNUSUAL,
+        "UNUSUAL_VOLATILITY",
+        "Unusual volatility",
+        Semantic.UNUSUAL,
         "Recent price variability is materially above its normal historical "
         "level. This is an activity and risk signal, not a directional forecast.",
     ),
     "MARKET_REGIME_CHANGE": _s(
-        "MARKET_REGIME_CHANGE", "Market regime change", Semantic.UNUSUAL,
-        "The benchmark moved to a different trend state and held it long enough "
-        "to be reported.",
+        "MARKET_REGIME_CHANGE",
+        "Market regime change",
+        Semantic.UNUSUAL,
+        "The benchmark moved to a different trend state and held it long enough to be reported.",
     ),
     "SECTOR_MOVE": _s(
-        "SECTOR_MOVE", "Sector move", Semantic.UNUSUAL,
+        "SECTOR_MOVE",
+        "Sector move",
+        Semantic.UNUSUAL,
         "A sector basket moved materially over five sessions.",
     ),
     "RELATIVE_STRENGTH_CHANGE": _s(
-        "RELATIVE_STRENGTH_CHANGE", "Relative strength change", Semantic.UNUSUAL,
-        "Its twelve-month return crossed from one side of the benchmark's to the "
-        "other.",
+        "RELATIVE_STRENGTH_CHANGE",
+        "Relative strength change",
+        Semantic.UNUSUAL,
+        "Its twelve-month return crossed from one side of the benchmark's to the other.",
     ),
     "NEW_SEC_FILING": _s(
-        "NEW_SEC_FILING", "New SEC filing", Semantic.NEUTRAL,
+        "NEW_SEC_FILING",
+        "New SEC filing",
+        Semantic.NEUTRAL,
         "A filing appeared that was not present at the previous observation.",
     ),
     "FUNDAMENTAL_CHANGE": _s(
-        "FUNDAMENTAL_CHANGE", "Fundamental change", Semantic.UNUSUAL,
+        "FUNDAMENTAL_CHANGE",
+        "Fundamental change",
+        Semantic.UNUSUAL,
         "A trailing twelve-month figure moved materially between observations.",
     ),
     "VALUATION_STATE_CHANGE": _s(
-        "VALUATION_STATE_CHANGE", "Valuation state change", Semantic.UNUSUAL,
+        "VALUATION_STATE_CHANGE",
+        "Valuation state change",
+        Semantic.UNUSUAL,
         "Its valuation moved into a different band of its own history.",
     ),
     "COMPANY_CONFIDENCE_CHANGE": _s(
-        "COMPANY_CONFIDENCE_CHANGE", "Data confidence change", Semantic.UNCERTAIN,
+        "COMPANY_CONFIDENCE_CHANGE",
+        "Data confidence change",
+        Semantic.UNCERTAIN,
         "The quality of the data behind the company analysis changed. This is "
         "about the data, not about the company.",
     ),
     "DATA_HEALTH_CHANGE": _s(
-        "DATA_HEALTH_CHANGE", "Data health change", Semantic.BAD,
+        "DATA_HEALTH_CHANGE",
+        "Data health change",
+        Semantic.BAD,
         "The state of the fundamentals data store changed.",
     ),
     # -- valuation --------------------------------------------------------
     "VERY_HIGH_VS_HISTORY": _s(
-        "VERY_HIGH_VS_HISTORY", "Very high vs its own history", Semantic.UNUSUAL,
+        "VERY_HIGH_VS_HISTORY",
+        "Very high vs its own history",
+        Semantic.UNUSUAL,
         "Priced near the top of its own historical range. Expensive relative to "
         "its past, which says nothing about where it goes next.",
         short="very high",
     ),
     "HIGH_VS_HISTORY": _s(
-        "HIGH_VS_HISTORY", "High vs its own history", Semantic.UNUSUAL,
+        "HIGH_VS_HISTORY",
+        "High vs its own history",
+        Semantic.UNUSUAL,
         "Priced above its own historical norm.",
         short="high",
     ),
     "NORMAL_VS_HISTORY": _s(
-        "NORMAL_VS_HISTORY", "Normal vs its own history", Semantic.NEUTRAL,
+        "NORMAL_VS_HISTORY",
+        "Normal vs its own history",
+        Semantic.NEUTRAL,
         "Priced in line with its own historical range.",
         short="normal",
     ),
     "LOW_VS_HISTORY": _s(
-        "LOW_VS_HISTORY", "Low vs its own history", Semantic.UNUSUAL,
+        "LOW_VS_HISTORY",
+        "Low vs its own history",
+        Semantic.UNUSUAL,
         "Priced below its own historical norm. Cheap relative to its past is not "
         "the same as underpriced.",
         short="low",
     ),
     "VERY_LOW_VS_HISTORY": _s(
-        "VERY_LOW_VS_HISTORY", "Very low vs its own history", Semantic.UNUSUAL,
+        "VERY_LOW_VS_HISTORY",
+        "Very low vs its own history",
+        Semantic.UNUSUAL,
         "Priced near the bottom of its own historical range.",
         short="very low",
     ),
     # -- balance sheet and capital structure -------------------------------
     "NET_CASH": _s(
-        "NET_CASH", "Net cash", Semantic.GOOD,
+        "NET_CASH",
+        "Net cash",
+        Semantic.GOOD,
         "Cash and liquid resources exceed debt.",
         short="holds net cash",
     ),
     "ACCEPTABLE": _s(
-        "ACCEPTABLE", "Acceptable balance sheet", Semantic.NEUTRAL,
+        "ACCEPTABLE",
+        "Acceptable balance sheet",
+        Semantic.NEUTRAL,
         "Debt is present but modest relative to the cash the business generates.",
         short="carries moderate net debt",
     ),
     "LEVERAGED": _s(
-        "LEVERAGED", "Leveraged", Semantic.BAD,
+        "LEVERAGED",
+        "Leveraged",
+        Semantic.BAD,
         "Debt is large relative to the cash the business generates.",
         short="carries substantial net debt",
     ),
     "MATERIAL_DILUTION": _s(
-        "MATERIAL_DILUTION", "Material share-count increase", Semantic.BAD,
+        "MATERIAL_DILUTION",
+        "Material share-count increase",
+        Semantic.BAD,
         "The share count increased materially, reducing each existing share's "
         "ownership percentage.",
         short="materially increasing",
     ),
     "BUYBACK_REDUCING_SHARE_COUNT": _s(
-        "BUYBACK_REDUCING_SHARE_COUNT", "Share count decreasing", Semantic.GOOD,
+        "BUYBACK_REDUCING_SHARE_COUNT",
+        "Share count decreasing",
+        Semantic.GOOD,
         "Fewer shares are outstanding than in the comparison period, so each "
         "remaining share represents a larger ownership percentage.",
         short="decreasing",
     ),
     "STABLE": _s(
-        "STABLE", "Share count stable", Semantic.NEUTRAL,
+        "STABLE",
+        "Share count stable",
+        Semantic.NEUTRAL,
         "The share count has not changed materially.",
         short="stable",
     ),
     "DILUTING": _s(
-        "DILUTING", "Share count increasing", Semantic.BAD,
+        "DILUTING",
+        "Share count increasing",
+        Semantic.BAD,
         "More shares are outstanding than in the comparison period, so each "
         "existing share represents a smaller ownership percentage.",
         short="increasing",
     ),
     "SPLIT_ADJUSTMENT_REQUIRED": _s(
-        "SPLIT_ADJUSTMENT_REQUIRED", "Share-count trend unavailable",
+        "SPLIT_ADJUSTMENT_REQUIRED",
+        "Share-count trend unavailable",
         Semantic.UNAVAILABLE,
         "A stock split falls inside the comparison window, so the before and "
         "after counts are not comparable.",
@@ -264,115 +313,174 @@ STATES: Final[dict[str, State]] = {
     ),
     # -- portfolio --------------------------------------------------------
     "HIGH_CONCENTRATION": _s(
-        "HIGH_CONCENTRATION", "High concentration", Semantic.BAD,
+        "HIGH_CONCENTRATION",
+        "High concentration",
+        Semantic.BAD,
         "A large share of the portfolio sits in very few positions, so single-name "
         "outcomes dominate the result.",
     ),
     "MODERATE_CONCENTRATION": _s(
-        "MODERATE_CONCENTRATION", "Moderate concentration", Semantic.NEUTRAL,
+        "MODERATE_CONCENTRATION",
+        "Moderate concentration",
+        Semantic.NEUTRAL,
         "The largest holdings carry a meaningful but not dominant share.",
     ),
     "LOW_CONCENTRATION": _s(
-        "LOW_CONCENTRATION", "Low concentration", Semantic.GOOD,
+        "LOW_CONCENTRATION",
+        "Low concentration",
+        Semantic.GOOD,
         "Holdings are spread widely enough that no single one dominates.",
     ),
     "EXTREME_OVERLAP": _s(
-        "EXTREME_OVERLAP", "Extreme overlap", Semantic.BAD,
+        "EXTREME_OVERLAP",
+        "Extreme overlap",
+        Semantic.BAD,
         "Moves almost in lockstep with existing holdings, so they behave as one "
         "position rather than several.",
     ),
     "HIGH_OVERLAP": _s(
-        "HIGH_OVERLAP", "High overlap", Semantic.BAD,
+        "HIGH_OVERLAP",
+        "High overlap",
+        Semantic.BAD,
         "Moves similarly to existing holdings and increases concentration risk.",
     ),
     "ELEVATED_OVERLAP": _s(
-        "ELEVATED_OVERLAP", "Elevated overlap", Semantic.UNUSUAL,
+        "ELEVATED_OVERLAP",
+        "Elevated overlap",
+        Semantic.UNUSUAL,
         "Moves somewhat together with existing holdings; more shared exposure "
         "than a typical pair of stocks.",
     ),
     "NORMAL_OVERLAP": _s(
-        "NORMAL_OVERLAP", "Normal overlap", Semantic.NEUTRAL,
+        "NORMAL_OVERLAP",
+        "Normal overlap",
+        Semantic.NEUTRAL,
         "Shares about as much movement with the portfolio as any two stocks do.",
     ),
     "IMPROVES_DIVERSIFICATION": _s(
-        "IMPROVES_DIVERSIFICATION", "Improves diversification", Semantic.GOOD,
+        "IMPROVES_DIVERSIFICATION",
+        "Improves diversification",
+        Semantic.GOOD,
         "Historically moves relatively independently of the existing portfolio.",
     ),
     "INCREASES_CONCENTRATION": _s(
-        "INCREASES_CONCENTRATION", "Increases concentration", Semantic.BAD,
+        "INCREASES_CONCENTRATION",
+        "Increases concentration",
+        Semantic.BAD,
         "Adds to an exposure the portfolio already carries heavily.",
     ),
     "NEUTRAL_FIT": _s(
-        "NEUTRAL_FIT", "Neutral fit", Semantic.NEUTRAL,
+        "NEUTRAL_FIT",
+        "Neutral fit",
+        Semantic.NEUTRAL,
         "Changes neither concentration nor correlation materially.",
     ),
     "ALREADY_HELD": _s(
-        "ALREADY_HELD", "Already held", Semantic.NEUTRAL,
+        "ALREADY_HELD",
+        "Already held",
+        Semantic.NEUTRAL,
         "This position is already in the portfolio.",
     ),
     "CASH ONLY": _s(
-        "CASH ONLY", "Cash only", Semantic.NEUTRAL,
+        "CASH ONLY",
+        "Cash only",
+        Semantic.NEUTRAL,
         "The account holds no positions, so there is no market exposure to describe.",
     ),
     # -- coverage ---------------------------------------------------------
     "FULL_PORTFOLIO": _s(
-        "FULL_PORTFOLIO", "Full portfolio", Semantic.NEUTRAL,
+        "FULL_PORTFOLIO",
+        "Full portfolio",
+        Semantic.NEUTRAL,
         "Configured as representing the complete portfolio.",
     ),
     "PARTIAL_PORTFOLIO": _s(
-        "PARTIAL_PORTFOLIO", "Partial portfolio", Semantic.UNCERTAIN,
+        "PARTIAL_PORTFOLIO",
+        "Partial portfolio",
+        Semantic.UNCERTAIN,
         "This account is one part of a larger portfolio, so percentages describe "
         "this account only.",
     ),
     "US_ONLY_VIEW": _s(
-        "US_ONLY_VIEW", "US-listed holdings only", Semantic.UNCERTAIN,
+        "US_ONLY_VIEW",
+        "US-listed holdings only",
+        Semantic.UNCERTAIN,
         "Only US-listed holdings are visible here; anything held elsewhere is not "
         "included in these percentages.",
     ),
     "ALPACA_ACCOUNT_ONLY": _s(
-        "ALPACA_ACCOUNT_ONLY", "This account only", Semantic.UNCERTAIN,
+        "ALPACA_ACCOUNT_ONLY",
+        "This account only",
+        Semantic.UNCERTAIN,
         "These figures describe this brokerage account. They are not a view of "
         "total holdings or wealth.",
     ),
     # -- confidence and data ----------------------------------------------
-    "HIGH": _s("HIGH", "High confidence", Semantic.GOOD,
-               "The data behind this assessment is complete and consistent."),
-    "MEDIUM": _s("MEDIUM", "Medium confidence", Semantic.NEUTRAL,
-                 "The data behind this assessment is usable but not complete."),
-    "LOW": _s("LOW", "Low confidence", Semantic.UNCERTAIN,
-              "The underlying data is incomplete or weaker than required for a "
-              "high-confidence assessment."),
-    "INSUFFICIENT": _s("INSUFFICIENT", "Insufficient data", Semantic.UNAVAILABLE,
-                       "There is not enough data to make this assessment."),
+    "HIGH": _s(
+        "HIGH",
+        "High confidence",
+        Semantic.GOOD,
+        "The data behind this assessment is complete and consistent.",
+    ),
+    "MEDIUM": _s(
+        "MEDIUM",
+        "Medium confidence",
+        Semantic.NEUTRAL,
+        "The data behind this assessment is usable but not complete.",
+    ),
+    "LOW": _s(
+        "LOW",
+        "Low confidence",
+        Semantic.UNCERTAIN,
+        "The underlying data is incomplete or weaker than required for a "
+        "high-confidence assessment.",
+    ),
+    "INSUFFICIENT": _s(
+        "INSUFFICIENT",
+        "Insufficient data",
+        Semantic.UNAVAILABLE,
+        "There is not enough data to make this assessment.",
+    ),
     "INSUFFICIENT_DATA": _s(
-        "INSUFFICIENT_DATA", "Insufficient data", Semantic.UNAVAILABLE,
+        "INSUFFICIENT_DATA",
+        "Insufficient data",
+        Semantic.UNAVAILABLE,
         "Tradabot does not have enough comparable data to make this assessment.",
     ),
     "ADVISOR_CONTEXT_UNAVAILABLE": _s(
-        "ADVISOR_CONTEXT_UNAVAILABLE", "Company context unavailable",
+        "ADVISOR_CONTEXT_UNAVAILABLE",
+        "Company context unavailable",
         Semantic.UNAVAILABLE,
-        "No company analysis is available for this symbol. The portfolio figures "
-        "are unaffected.",
+        "No company analysis is available for this symbol. The portfolio figures are unaffected.",
     ),
     "SECTOR_SPECIFIC_MODEL_REQUIRED": _s(
-        "SECTOR_SPECIFIC_MODEL_REQUIRED", "Not applicable to this sector",
+        "SECTOR_SPECIFIC_MODEL_REQUIRED",
+        "Not assessed for a financial company",
         Semantic.UNAVAILABLE,
-        "This metric is not meaningful for this kind of company, so it is refused "
-        "rather than estimated.",
+        "For a bank or insurer, deposits and borrowings are the business rather "
+        "than a way of funding it, so leverage and margin readings that describe "
+        "an industrial company describe nothing here. Judging one properly needs "
+        "a model built for it, which Tradabot does not have.",
     ),
     "READY": _s("READY", "Ready", Semantic.GOOD, "Data is present and current."),
     "DATA_NOT_SYNCED": _s(
-        "DATA_NOT_SYNCED", "Not synced", Semantic.BAD,
+        "DATA_NOT_SYNCED",
+        "Not synced",
+        Semantic.BAD,
         "The fundamentals store has never been built. Company analysis is "
         "unavailable until it is synced.",
     ),
     "DATA_STALE": _s(
-        "DATA_STALE", "Stale", Semantic.UNCERTAIN,
+        "DATA_STALE",
+        "Stale",
+        Semantic.UNCERTAIN,
         "The fundamentals store is readable but its newest filing is old, so "
         "recent quarters may be missing.",
     ),
     "DATA_CORRUPT": _s(
-        "DATA_CORRUPT", "Corrupt", Semantic.BAD,
+        "DATA_CORRUPT",
+        "Corrupt",
+        Semantic.BAD,
         "The fundamentals store cannot be read as expected and is not being used.",
     ),
     # -- materiality ------------------------------------------------------
@@ -382,17 +490,28 @@ STATES: Final[dict[str, State]] = {
     "ROUTINE": _s("ROUTINE", "Routine", Semantic.NEUTRAL, None),
     # -- operational ------------------------------------------------------
     "HEALTHY": _s("HEALTHY", "Healthy", Semantic.GOOD, None),
-    "DEGRADED": _s("DEGRADED", "Degraded", Semantic.BAD,
-                   "Some messages could not be delivered. Analysis is unaffected."),
+    "DEGRADED": _s(
+        "DEGRADED",
+        "Degraded",
+        Semantic.BAD,
+        "Some messages could not be delivered. Analysis is unaffected.",
+    ),
     "NOT CONFIGURED": _s(
-        "NOT CONFIGURED", "Not configured", Semantic.UNCERTAIN,
+        "NOT CONFIGURED",
+        "Not configured",
+        Semantic.UNCERTAIN,
         "This check is not set up, so its state is unknown rather than good.",
     ),
     "UP": _s("UP", "Up", Semantic.GOOD, None),
-    "LATE": _s("LATE", "Late", Semantic.UNCERTAIN,
-               "A heartbeat is overdue but still inside the grace period."),
-    "DOWN": _s("DOWN", "Down", Semantic.BAD,
-               "No heartbeat has arrived for longer than the grace period."),
+    "LATE": _s(
+        "LATE",
+        "Late",
+        Semantic.UNCERTAIN,
+        "A heartbeat is overdue but still inside the grace period.",
+    ),
+    "DOWN": _s(
+        "DOWN", "Down", Semantic.BAD, "No heartbeat has arrived for longer than the grace period."
+    ),
     "RECOVERED": _s("RECOVERED", "Recovered", Semantic.GOOD, None),
     "UNKNOWN": _s("UNKNOWN", "Unknown", Semantic.UNAVAILABLE, None),
 }
@@ -465,6 +584,7 @@ def humanise(text: str) -> str:
     render time keeps the two concerns apart: presentation never edits what the
     engine concluded, only how it is spelled.
     """
+
     def swap(match: re.Match[str]) -> str:
         held = STATES.get(match.group(0))
         return held.short.lower() if held else match.group(0)

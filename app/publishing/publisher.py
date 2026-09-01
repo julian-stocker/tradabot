@@ -54,6 +54,7 @@ def _embed_characters(embed: dict[str, Any]) -> int:
     total += len(str((embed.get("footer") or {}).get("text", "")))
     return total
 
+
 RECOVERY_THRESHOLD = 10
 """Failed deliveries that must accumulate before recovery is summarised rather
 than retried one by one."""
@@ -122,9 +123,7 @@ class Publisher:
         self.rendered: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------- delivery
-    async def _send(
-        self, channel: WebhookChannel, message: NotificationMessage
-    ) -> DeliveryResult:
+    async def _send(self, channel: WebhookChannel, message: NotificationMessage) -> DeliveryResult:
         """Deliver one message. **Never raises into the caller.**"""
         from app.notifications.embeds import build_payload  # noqa: PLC0415
 
@@ -276,9 +275,7 @@ class Publisher:
         outcome.destinations.append(channel.value)
         if self._dry_run:
             return
-        status = (
-            DeliveryStatus.DELIVERED if result.delivered else DeliveryStatus.DELIVERY_FAILED
-        )
+        status = DeliveryStatus.DELIVERED if result.delivered else DeliveryStatus.DELIVERY_FAILED
         if result.delivered:
             outcome.delivered += 1
         else:
@@ -338,9 +335,7 @@ class Publisher:
             accumulated=len(failures), still_relevant=still, occurred_at=when
         )
         result = await self._send(SYSTEM, message)
-        self._record(
-            outcome, f"recovery:{when.date().isoformat()}", SYSTEM, result, now=when
-        )
+        self._record(outcome, f"recovery:{when.date().isoformat()}", SYSTEM, result, now=when)
         if result.delivered and not self._dry_run:
             self._ledger.forget(failures)
         self._ledger.flush()

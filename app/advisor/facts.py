@@ -15,6 +15,7 @@ Two properties matter and are enforced here:
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -86,6 +87,7 @@ _CONCEPT_PRIORITY: dict[str, tuple[str, ...]] = {
     ),
 }
 
+
 class ShareFamily(StrEnum):
     """Share counts that look alike but measure different things.
 
@@ -110,9 +112,7 @@ SHARE_FAMILY_BY_CONCEPT: dict[str, ShareFamily] = {
     "CommonStockSharesIssued": ShareFamily.OTHER,
     "EntityCommonStockSharesOutstanding": ShareFamily.COVER_PAGE,
     "WeightedAverageNumberOfSharesOutstandingBasic": ShareFamily.WEIGHTED_AVERAGE_BASIC,
-    "WeightedAverageNumberOfDilutedSharesOutstanding": (
-        ShareFamily.WEIGHTED_AVERAGE_DILUTED
-    ),
+    "WeightedAverageNumberOfDilutedSharesOutstanding": (ShareFamily.WEIGHTED_AVERAGE_DILUTED),
 }
 
 
@@ -124,6 +124,21 @@ def share_family(concept: str) -> ShareFamily:
 _QUARTER_MIN, _QUARTER_MAX = 80, 100
 _ANNUAL_MIN, _ANNUAL_MAX = 350, 380
 _STALE_DAYS = 200
+
+ABANDONED_LAG_DAYS = 550
+"""How far a metric may lag the company's own latest reported period before it
+stops counting as that company's current figure.
+
+Agnico Eagle moved from us-gaap to ifrs-full in 2015. ``OperatingIncomeLoss``
+stopped being filed then, and because it was still the freshest fact *for that
+metric* the Advisor kept serving it: a 2013 operating income printed beside 2025
+revenue, and an operating margin of 3.6% computed by dividing one by the other.
+Every input was real and the ratio was invented.
+
+The lag is measured against the company rather than the clock, so an annual
+filer is not punished for filing annually. Eighteen months clears a full annual
+cycle plus a late filing; past that the series has missed a reporting period it
+should have had, which means the company stopped reporting it."""
 _TTM_QUARTERS = 4
 
 
@@ -135,6 +150,16 @@ def _duration(row: dict[str, Any]) -> int | None:
         return (date.fromisoformat(str(end)) - date.fromisoformat(str(start))).days
     except ValueError:
         return None
+
+
+def company_key(cik: int | str) -> str:
+    """The canonical fact key for a company, from its CIK.
+
+    Prefixed and zero-padded so it can never collide with a ticker: ``CIK0000320193``
+    is not a symbol anyone can type, which is what keeps the two index spaces
+    from silently overlapping.
+    """
+    return f"CIK{int(cik):010d}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,17 +183,67 @@ class FactStore:
 
     def __init__(self, rows: Iterable[dict[str, Any]]) -> None:
         self._by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._companies: set[str] = set()
+        self._reported: dict[str, list[tuple[str, str]]] = {}
+        """Per key, every ``(filed, period_end)`` the company published. Sorted
+        and turned into a running maximum in :meth:`_seal`, so the yardstick for
+        abandonment can itself be read as of a date rather than with hindsight."""
         for row in rows:
             filed, value = row.get("filed"), row.get("value")
             if filed is None or value is None:
                 continue
-            key = (str(row["symbol"]), str(row["metric"]))
-            self._by.setdefault(key, []).append(row)
+            metric = str(row["metric"])
+            symbol = str(row["symbol"])
+            self._by.setdefault((symbol, metric), []).append(row)
+            period = str(row.get("period_end") or "")
+            if period:
+                self._reported.setdefault(symbol, []).append((str(filed), period))
+            # A second index on company identity. Facts belong to the reporting
+            # entity, not to a ticker: SAP SE files once and trades in Frankfurt
+            # and New York, and both listings must see the same numbers without
+            # a second copy existing. The symbol index stays because a US
+            # listing's ticker is a valid handle for its own company, and
+            # removing it would change validated behaviour for no gain.
+            cik = row.get("cik")
+            if cik is not None:
+                key = company_key(cik)
+                self._companies.add(key)
+                self._by.setdefault((key, metric), []).append(row)
+                if period:
+                    self._reported.setdefault(key, []).append((str(filed), period))
+
+        self._seal()
+
+    def _seal(self) -> None:
+        """Collapse each key's filings into a running maximum period by filing
+        date, so ``_horizon`` is one binary search rather than a scan."""
+        for key, pairs in self._reported.items():
+            pairs.sort()
+            best = ""
+            sealed: list[tuple[str, str]] = []
+            for filed, period in pairs:
+                best = max(best, period)
+                sealed.append((filed, best))
+            self._reported[key] = sealed
+
+    def _horizon(self, symbol: str, as_of: str) -> str | None:
+        """The freshest period this key had reported anything for, as known at
+        ``as_of``. Never a period only a later filing revealed."""
+        sealed = self._reported.get(symbol)
+        if not sealed:
+            return None
+        index = bisect_right(sealed, (as_of, chr(0x10FFFF))) - 1
+        return sealed[index][1] if index >= 0 else None
 
     @classmethod
     def from_parquet(cls, path: str | Path) -> FactStore:
         frame = pl.read_parquet(path)
         return cls(frame.iter_rows(named=True))
+
+    @property
+    def companies(self) -> frozenset[str]:
+        """Company keys with at least one fact. CIK-derived, never tickers."""
+        return frozenset(self._companies)
 
     @property
     def symbols(self) -> frozenset[str]:
@@ -193,9 +268,7 @@ class FactStore:
                 latest[key] = row
 
         chosen = _choose_concept(metric, list(latest.values()))
-        selected = [
-            r for r in latest.values() if (str(r["concept"]), str(r["unit"])) == chosen
-        ]
+        selected = [r for r in latest.values() if (str(r["concept"]), str(r["unit"])) == chosen]
 
         quarters, provenance, cumulative = _split_by_duration(selected)
         for group in cumulative.values():
@@ -219,6 +292,23 @@ class FactStore:
                 provenance[end] = _provenance(row, value)
         return quarters, provenance
 
+    def _abandoned(self, symbol: str, period_end: str, as_of: str) -> bool:
+        """Whether this metric stopped being reported while the company did not.
+
+        Compares the metric's freshest period against the freshest period the
+        company reported anything for *as of the same date*, so the judgement is
+        point-in-time too: a metric is not retroactively abandoned at a date when
+        it was still current.
+        """
+        horizon = self._horizon(symbol, as_of)
+        if horizon is None or not period_end:
+            return False
+        try:
+            lag = (date.fromisoformat(horizon) - date.fromisoformat(period_end)).days
+        except ValueError:
+            return False
+        return lag > ABANDONED_LAG_DAYS
+
     def ttm(self, symbol: str, metric: str, as_of: str) -> TtmResult:
         """Sum of the four most recent contiguous quarters known at ``as_of``."""
         quarters, provenance = self.quarterlies(symbol, metric, as_of)
@@ -230,6 +320,10 @@ class FactStore:
                 if not _QUARTER_MIN <= gap <= _QUARTER_MAX:
                     contiguous = False
                     break
+            if contiguous and self._abandoned(symbol, ends[-1], as_of):
+                return TtmResult(
+                    value=None, basis=DenominatorBasis.UNAVAILABLE, status="ABANDONED_SERIES"
+                )
             if contiguous:
                 age = (date.fromisoformat(as_of) - date.fromisoformat(ends[-1])).days
                 return TtmResult(
@@ -257,6 +351,8 @@ class FactStore:
             if held is None or str(row["filed"]) > str(held["filed"]):
                 latest[end] = row
         end = max(latest)
+        if self._abandoned(symbol, end, as_of):
+            return TtmResult(None, DenominatorBasis.UNAVAILABLE, "ABANDONED_SERIES")
         row = latest[end]
         age = (date.fromisoformat(as_of) - date.fromisoformat(end)).days
         return TtmResult(
@@ -279,6 +375,8 @@ class FactStore:
             if held is None or str(row["filed"]) > str(held["filed"]):
                 latest[end] = row
         end = max(latest)
+        if self._abandoned(symbol, end, as_of):
+            return TtmResult(None, DenominatorBasis.UNAVAILABLE, "ABANDONED_SERIES")
         row = latest[end]
         age = (date.fromisoformat(as_of) - date.fromisoformat(end)).days
         return TtmResult(
@@ -324,9 +422,7 @@ class FactStore:
         return max(dates) if dates else None
 
 
-def _choose_concept(
-    metric: str, rows: list[dict[str, Any]]
-) -> tuple[str, str]:
+def _choose_concept(metric: str, rows: list[dict[str, Any]]) -> tuple[str, str]:
     """Which XBRL concept represents this metric under the current regime.
 
     Historical frequency is the wrong signal: a company that switched taxonomy
@@ -336,11 +432,7 @@ def _choose_concept(
     ties among concepts filed on the same day.
     """
     latest_filed = max(str(r["filed"]) for r in rows)
-    current = {
-        (str(r["concept"]), str(r["unit"]))
-        for r in rows
-        if str(r["filed"]) == latest_filed
-    }
+    current = {(str(r["concept"]), str(r["unit"])) for r in rows if str(r["filed"]) == latest_filed}
     priority = _CONCEPT_PRIORITY.get(metric, ())
 
     def rank(combo: tuple[str, str]) -> tuple[int, int]:

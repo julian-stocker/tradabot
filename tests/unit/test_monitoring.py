@@ -42,8 +42,17 @@ PACKAGE = Path("app/monitoring")
 NOW = datetime(2026, 8, 14, 21, 0, tzinfo=UTC)
 
 FORBIDDEN_IMPORTS = ("app.broker", "alpaca", "app.db", "sqlalchemy")
-ACTION_WORDS = ("BUY", "SELL", "ROTATE", "REPLACE", "REDUCE", "INCREASE",
-                "target_weight", "expected_return", "recommend")
+ACTION_WORDS = (
+    "BUY",
+    "SELL",
+    "ROTATE",
+    "REPLACE",
+    "REDUCE",
+    "INCREASE",
+    "target_weight",
+    "expected_return",
+    "recommend",
+)
 
 
 def _sources() -> list[tuple[Path, str]]:
@@ -54,8 +63,9 @@ def _flat(closes: dict[str, float], volumes: dict[str, float] | None = None) -> 
     return Bars(closes, volumes or dict.fromkeys(closes, 1_000.0))
 
 
-def _series(days: int, start: str = "2025-01-01", price: float = 100.0,
-            volume: float = 1_000.0) -> tuple[dict[str, float], dict[str, float]]:
+def _series(
+    days: int, start: str = "2025-01-01", price: float = 100.0, volume: float = 1_000.0
+) -> tuple[dict[str, float], dict[str, float]]:
     base = datetime.fromisoformat(start)
     closes, volumes = {}, {}
     for i in range(days):
@@ -99,9 +109,7 @@ class TestCannotTradeOrRecommend:
         # rather than matching the promise itself, and skip the __future__
         # import, which is a language feature and not a data source.
         body = "\n".join(
-            line
-            for line in source.split('"""', 2)[-1].splitlines()
-            if "__future__" not in line
+            line for line in source.split('"""', 2)[-1].splitlines() if "__future__" not in line
         )
         for forbidden in ("y_r_", "forward", "future", "next_session", "shift(-"):
             assert forbidden not in body, f"observations reference {forbidden}"
@@ -205,12 +213,18 @@ class TestDetectors:
         previous = {"regime": "TRENDING_UP", "distance_from_ma200": 0.05}
         current = {"regime": "TRENDING_DOWN", "distance_from_ma200": -0.04}
         early = detectors.detect_market_regime(
-            previous, current, now=NOW, as_of="2026-08-14",
+            previous,
+            current,
+            now=NOW,
+            as_of="2026-08-14",
             sessions_in_state=rules.REGIME_MIN_SESSIONS_IN_STATE - 1,
         )
         assert early == []
         confirmed = detectors.detect_market_regime(
-            previous, current, now=NOW, as_of="2026-08-14",
+            previous,
+            current,
+            now=NOW,
+            as_of="2026-08-14",
             sessions_in_state=rules.REGIME_MIN_SESSIONS_IN_STATE,
         )
         assert len(confirmed) == 1
@@ -218,11 +232,12 @@ class TestDetectors:
 
     def test_a_new_filing_is_identified_by_its_accession(self) -> None:
         previous = {"latest_accession": "0001-25-A", "latest_form": "10-Q"}
-        current = {"latest_accession": "0001-26-A", "latest_form": "10-K",
-                   "latest_filed": "2026-01-20"}
-        events = detectors.detect_company(
-            "AAA", previous, current, now=NOW, as_of="2026-08-14"
-        )
+        current = {
+            "latest_accession": "0001-26-A",
+            "latest_form": "10-K",
+            "latest_filed": "2026-01-20",
+        }
+        events = detectors.detect_company("AAA", previous, current, now=NOW, as_of="2026-08-14")
         filings = [e for e in events if e.kind is EventKind.NEW_SEC_FILING]
         assert len(filings) == 1
         assert filings[0].materiality is Materiality.SIGNIFICANT
@@ -230,9 +245,7 @@ class TestDetectors:
 
     def test_an_unchanged_filing_is_not_news(self) -> None:
         state = {"latest_accession": "0001-26-A", "latest_form": "10-K"}
-        events = detectors.detect_company(
-            "AAA", state, state, now=NOW, as_of="2026-08-14"
-        )
+        events = detectors.detect_company("AAA", state, state, now=NOW, as_of="2026-08-14")
         assert [e for e in events if e.kind is EventKind.NEW_SEC_FILING] == []
 
     def test_a_position_appearing_and_leaving_are_both_events(self) -> None:
@@ -298,8 +311,9 @@ class TestDetectors:
 
 class TestSuppression:
     @staticmethod
-    def _spike_inputs(day: str, closes: dict[str, float],
-                      volumes: dict[str, float]) -> MonitoringInputs:
+    def _spike_inputs(
+        day: str, closes: dict[str, float], volumes: dict[str, float]
+    ) -> MonitoringInputs:
         return MonitoringInputs(
             as_of=day,
             bars={"SPY": Bars(closes, volumes), "AAA": Bars(closes, volumes)},
@@ -313,9 +327,7 @@ class TestSuppression:
         for day in days[-2:]:
             volumes[day] = 1_000.0 * 10
         store = InMemoryStateStore()
-        first = MonitoringEngine(store, now=NOW).run(
-            self._spike_inputs(days[-2], closes, volumes)
-        )
+        first = MonitoringEngine(store, now=NOW).run(self._spike_inputs(days[-2], closes, volumes))
         second = MonitoringEngine(store, now=NOW + timedelta(hours=24)).run(
             self._spike_inputs(days[-1], closes, volumes)
         )
@@ -368,9 +380,13 @@ class TestSuppression:
 
 class TestRankingAndDigest:
     @staticmethod
-    def _event(kind: EventKind, subject: str, band: Materiality,
-               confidence: EventConfidence = EventConfidence.HIGH,
-               change: float = 0.0) -> ChangeEvent:
+    def _event(
+        kind: EventKind,
+        subject: str,
+        band: Materiality,
+        confidence: EventConfidence = EventConfidence.HIGH,
+        change: float = 0.0,
+    ) -> ChangeEvent:
         return ChangeEvent(
             kind=kind,
             occurred_at=NOW,
@@ -413,12 +429,8 @@ class TestRankingAndDigest:
         events = [
             self._event(EventKind.UNUSUAL_VOLUME, "AAA", Materiality.NOTABLE).as_dict(),
             self._event(EventKind.SECTOR_MOVE, "tech", Materiality.NOTABLE).as_dict(),
-            self._event(
-                EventKind.FUNDAMENTAL_CHANGE, "AAA", Materiality.SIGNIFICANT
-            ).as_dict(),
-            self._event(
-                EventKind.VALUATION_STATE_CHANGE, "AAA", Materiality.NOTABLE
-            ).as_dict(),
+            self._event(EventKind.FUNDAMENTAL_CHANGE, "AAA", Materiality.SIGNIFICANT).as_dict(),
+            self._event(EventKind.VALUATION_STATE_CHANGE, "AAA", Materiality.NOTABLE).as_dict(),
         ]
         digest = build_digest(events, {}, since="2026-08-08", until="2026-08-14")
         titles = {s.title: s for s in digest.sections}
@@ -508,13 +520,22 @@ class TestEventShape:
     def test_every_event_carries_the_required_fields(self) -> None:
         """The brief's contract: each field is present and populated."""
         events = detectors.detect_health(
-            {"status": "READY", "rows": 10}, {"status": "DATA_STALE", "rows": 10},
-            now=NOW, as_of="2026-08-14",
+            {"status": "READY", "rows": 10},
+            {"status": "DATA_STALE", "rows": 10},
+            now=NOW,
+            as_of="2026-08-14",
         )
         payload = events[0].as_dict()
         for field in (
-            "occurred_at", "subject", "previous_state", "current_state",
-            "materiality", "evidence", "confidence", "provenance", "scope",
+            "occurred_at",
+            "subject",
+            "previous_state",
+            "current_state",
+            "materiality",
+            "evidence",
+            "confidence",
+            "provenance",
+            "scope",
             "dedup_key",
         ):
             assert payload[field] not in (None, "", []), f"{field} is empty"
@@ -600,8 +621,13 @@ class TestValuationHysteresis:
     def test_an_oscillation_reports_nothing(self) -> None:
         """**The gate.** Flip-flopping across a boundary is noise, not news."""
         store = InMemoryStateStore()
-        bands = ["NORMAL_VS_HISTORY", "HIGH_VS_HISTORY", "NORMAL_VS_HISTORY",
-                 "HIGH_VS_HISTORY", "NORMAL_VS_HISTORY"]
+        bands = [
+            "NORMAL_VS_HISTORY",
+            "HIGH_VS_HISTORY",
+            "NORMAL_VS_HISTORY",
+            "HIGH_VS_HISTORY",
+            "NORMAL_VS_HISTORY",
+        ]
         runs = [
             self._run(store, band, f"2025-06-{1 + 7 * i:02d}", NOW + timedelta(days=7 * i))
             for i, band in enumerate(bands)
@@ -612,6 +638,7 @@ class TestValuationHysteresis:
 class TestDigestCollapsesRepeats:
     def test_one_row_per_subject_at_its_most_significant(self) -> None:
         """**The gate.** Four volatile days for one stock are one weekly line."""
+
         def event(subject: str, band: Materiality, change: float) -> dict:
             return ChangeEvent(
                 kind=EventKind.UNUSUAL_VOLATILITY,
@@ -637,6 +664,7 @@ class TestDigestCollapsesRepeats:
 
     def test_the_same_subject_in_two_accounts_stays_separate(self) -> None:
         """A weight change in one account is not the same event as in another."""
+
         def event(account: str) -> dict:
             return ChangeEvent(
                 kind=EventKind.PORTFOLIO_WEIGHT_CHANGE,
@@ -649,7 +677,5 @@ class TestDigestCollapsesRepeats:
                 scope=Scope(ScopeKind.PORTFOLIO, account=account),
             ).as_dict()
 
-        section = most_important_portfolio_changes(
-            [event("PAPER_1K"), event("PAPER_3K")]
-        )
+        section = most_important_portfolio_changes([event("PAPER_1K"), event("PAPER_3K")])
         assert {r["account"] for r in section.rows} == {"PAPER_1K", "PAPER_3K"}

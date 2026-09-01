@@ -105,9 +105,7 @@ def presence(
     return {name: bool(source.get(name, "").strip()) for name in REQUIRED}
 
 
-def load(
-    *, env: dict[str, str] | None = None, dotenv: Path | None = Path(".env")
-) -> BotSettings:
+def load(*, env: dict[str, str] | None = None, dotenv: Path | None = Path(".env")) -> BotSettings:
     """Resolve bot configuration, or refuse with a reason that names no value.
 
     Raises:

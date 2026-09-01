@@ -87,15 +87,27 @@ class TestPointInTime:
         """**The gate.** The whole historical analysis rests on this property."""
         rows = [
             {
-                "symbol": "TEST", "metric": "revenue", "concept": "Revenues",
-                "unit": "USD", "value": 100.0, "form": "10-K", "filed": "2024-02-01",
-                "accession": "orig", "period_start": "2023-01-01",
+                "symbol": "TEST",
+                "metric": "revenue",
+                "concept": "Revenues",
+                "unit": "USD",
+                "value": 100.0,
+                "form": "10-K",
+                "filed": "2024-02-01",
+                "accession": "orig",
+                "period_start": "2023-01-01",
                 "period_end": "2023-12-31",
             },
             {
-                "symbol": "TEST", "metric": "revenue", "concept": "Revenues",
-                "unit": "USD", "value": 90.0, "form": "10-K/A", "filed": "2025-02-01",
-                "accession": "restated", "period_start": "2023-01-01",
+                "symbol": "TEST",
+                "metric": "revenue",
+                "concept": "Revenues",
+                "unit": "USD",
+                "value": 90.0,
+                "form": "10-K/A",
+                "filed": "2025-02-01",
+                "accession": "restated",
+                "period_start": "2023-01-01",
                 "period_end": "2023-12-31",
             },
         ]
@@ -109,9 +121,15 @@ class TestPointInTime:
         store = FactStore(
             [
                 {
-                    "symbol": "TEST", "metric": "revenue", "concept": "Revenues",
-                    "unit": "USD", "value": 100.0, "form": "10-K", "filed": "2024-02-01",
-                    "accession": "a", "period_start": "2023-01-01",
+                    "symbol": "TEST",
+                    "metric": "revenue",
+                    "concept": "Revenues",
+                    "unit": "USD",
+                    "value": 100.0,
+                    "form": "10-K",
+                    "filed": "2024-02-01",
+                    "accession": "a",
+                    "period_start": "2023-01-01",
                     "period_end": "2023-12-31",
                 }
             ]
@@ -124,9 +142,16 @@ class TestYearToDateHandling:
         """A 10-Q reports cash flow year-to-date; summing it would double count."""
         rows = [
             {
-                "symbol": "T", "metric": "operating_cash_flow", "concept": "OCF",
-                "unit": "USD", "value": v, "form": "10-Q", "filed": f,
-                "accession": f"a{i}", "period_start": "2024-01-01", "period_end": e,
+                "symbol": "T",
+                "metric": "operating_cash_flow",
+                "concept": "OCF",
+                "unit": "USD",
+                "value": v,
+                "form": "10-Q",
+                "filed": f,
+                "accession": f"a{i}",
+                "period_start": "2024-01-01",
+                "period_end": e,
             }
             for i, (v, f, e) in enumerate(
                 [
@@ -143,9 +168,7 @@ class TestYearToDateHandling:
         assert quarters["2024-06-30"]["value"] == pytest.approx(150.0)
         assert quarters["2024-09-30"]["value"] == pytest.approx(170.0)
         assert quarters["2024-12-31"]["value"] == pytest.approx(180.0)
-        assert store.ttm("T", "operating_cash_flow", "2025-06-30").value == pytest.approx(
-            600.0
-        )
+        assert store.ttm("T", "operating_cash_flow", "2025-06-30").value == pytest.approx(600.0)
 
 
 class TestServiceShape:
@@ -170,20 +193,31 @@ class TestConceptSelection:
     def _rows() -> list[dict[str, object]]:
         old = [
             {
-                "symbol": "T", "metric": "revenue", "concept": "SalesRevenueNet",
-                "unit": "USD", "value": 10.0, "form": "10-Q", "filed": f"201{i}-04-30",
-                "accession": f"old{i}", "period_start": f"201{i}-01-01",
+                "symbol": "T",
+                "metric": "revenue",
+                "concept": "SalesRevenueNet",
+                "unit": "USD",
+                "value": 10.0,
+                "form": "10-Q",
+                "filed": f"201{i}-04-30",
+                "accession": f"old{i}",
+                "period_start": f"201{i}-01-01",
                 "period_end": f"201{i}-03-31",
             }
             for i in range(5)
         ]
         new = [
             {
-                "symbol": "T", "metric": "revenue",
+                "symbol": "T",
+                "metric": "revenue",
                 "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
-                "unit": "USD", "value": 100.0, "form": "10-Q",
-                "filed": f"2024-{m:02d}-28", "accession": f"new{m}",
-                "period_start": s, "period_end": e,
+                "unit": "USD",
+                "value": 100.0,
+                "form": "10-Q",
+                "filed": f"2024-{m:02d}-28",
+                "accession": f"new{m}",
+                "period_start": s,
+                "period_end": e,
             }
             for m, s, e in (
                 (4, "2024-01-01", "2024-03-31"),
@@ -208,9 +242,7 @@ class TestConceptSelection:
         store = FactStore(self._rows())
         quarters, _prov = store.quarterlies("T", "revenue", "2019-12-31")
         assert quarters
-        assert all(
-            str(row["concept"]) == "SalesRevenueNet" for row in quarters.values()
-        )
+        assert all(str(row["concept"]) == "SalesRevenueNet" for row in quarters.values())
 
 
 class TestShareFactSemantics:
@@ -237,19 +269,31 @@ class TestShareFactSemantics:
         for end, value, filed in period_end:
             rows.append(
                 {
-                    "symbol": "T", "metric": "shares_outstanding",
-                    "concept": "CommonStockSharesOutstanding", "unit": "shares",
-                    "value": value, "form": "10-K", "filed": filed,
-                    "accession": f"pe{end}", "period_start": None, "period_end": end,
+                    "symbol": "T",
+                    "metric": "shares_outstanding",
+                    "concept": "CommonStockSharesOutstanding",
+                    "unit": "shares",
+                    "value": value,
+                    "form": "10-K",
+                    "filed": filed,
+                    "accession": f"pe{end}",
+                    "period_start": None,
+                    "period_end": end,
                 }
             )
         for end, value, filed in cover:
             rows.append(
                 {
-                    "symbol": "T", "metric": "shares_outstanding",
-                    "concept": "EntityCommonStockSharesOutstanding", "unit": "shares",
-                    "value": value, "form": "10-Q", "filed": filed,
-                    "accession": f"cp{end}", "period_start": None, "period_end": end,
+                    "symbol": "T",
+                    "metric": "shares_outstanding",
+                    "concept": "EntityCommonStockSharesOutstanding",
+                    "unit": "shares",
+                    "value": value,
+                    "form": "10-Q",
+                    "filed": filed,
+                    "accession": f"cp{end}",
+                    "period_start": None,
+                    "period_end": end,
                 }
             )
         return rows
@@ -269,13 +313,9 @@ class TestShareFactSemantics:
         assert 937_000_000.0 not in values
 
     def test_dilution_uses_comparable_fiscal_year_ends(self) -> None:
-        service = AdvisorService(
-            FactStore(self._rows()), {"T": PriceSeries({"2026-08-13": 100.0})}
-        )
+        service = AdvisorService(FactStore(self._rows()), {"T": PriceSeries({"2026-08-13": 100.0})})
         report = service.analyse("T", as_of="2026-08-13")
-        capital = next(
-            s for s in report.company_quality if s.name == "CAPITAL STRUCTURE"
-        )
+        capital = next(s for s in report.company_quality if s.name == "CAPITAL STRUCTURE")
         yoy = capital.metrics["share_count_yoy"].value
         assert yoy is not None
         assert yoy == pytest.approx(929 / 962 - 1, abs=1e-9)
@@ -287,10 +327,15 @@ class TestShareFactSemantics:
         """Weighted-average shares serve EPS, not period-end ownership."""
         rows = [
             {
-                "symbol": "W", "metric": "shares_diluted",
+                "symbol": "W",
+                "metric": "shares_diluted",
                 "concept": "WeightedAverageNumberOfDilutedSharesOutstanding",
-                "unit": "shares", "value": 100.0, "form": "10-K", "filed": f"202{i}-03-01",
-                "accession": f"w{i}", "period_start": f"202{i}-01-01",
+                "unit": "shares",
+                "value": 100.0,
+                "form": "10-K",
+                "filed": f"202{i}-03-01",
+                "accession": f"w{i}",
+                "period_start": f"202{i}-01-01",
                 "period_end": f"202{i}-12-31",
             }
             for i in range(3, 7)
@@ -310,10 +355,16 @@ class TestShareFactSemantics:
         """Two period-end facts six months apart are not a year-over-year pair."""
         rows = [
             {
-                "symbol": "G", "metric": "shares_outstanding",
-                "concept": "CommonStockSharesOutstanding", "unit": "shares",
-                "value": v, "form": "10-K", "filed": "2026-07-01",
-                "accession": f"g{e}", "period_start": None, "period_end": e,
+                "symbol": "G",
+                "metric": "shares_outstanding",
+                "concept": "CommonStockSharesOutstanding",
+                "unit": "shares",
+                "value": v,
+                "form": "10-K",
+                "filed": "2026-07-01",
+                "accession": f"g{e}",
+                "period_start": None,
+                "period_end": e,
             }
             for e, v in (
                 ("2024-01-31", 1000.0),
@@ -322,9 +373,7 @@ class TestShareFactSemantics:
                 ("2026-01-31", 980.0),
             )
         ]
-        service = AdvisorService(
-            FactStore(rows), {"G": PriceSeries({"2026-08-13": 10.0})}
-        )
+        service = AdvisorService(FactStore(rows), {"G": PriceSeries({"2026-08-13": 10.0})})
         capital = next(
             s
             for s in service.analyse("G", as_of="2026-08-13").company_quality
@@ -343,16 +392,20 @@ class TestDegenerateShareSeries:
         """
         rows = [
             {
-                "symbol": "D", "metric": "shares_outstanding",
-                "concept": "CommonStockSharesOutstanding", "unit": "shares",
-                "value": 1_012_261_159.0, "form": "10-K", "filed": "2026-01-30",
-                "accession": "d1", "period_start": None, "period_end": e,
+                "symbol": "D",
+                "metric": "shares_outstanding",
+                "concept": "CommonStockSharesOutstanding",
+                "unit": "shares",
+                "value": 1_012_261_159.0,
+                "form": "10-K",
+                "filed": "2026-01-30",
+                "accession": "d1",
+                "period_start": None,
+                "period_end": e,
             }
             for e in ("2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31")
         ]
-        service = AdvisorService(
-            FactStore(rows), {"D": PriceSeries({"2026-08-13": 10.0})}
-        )
+        service = AdvisorService(FactStore(rows), {"D": PriceSeries({"2026-08-13": 10.0})})
         capital = next(
             s
             for s in service.analyse("D", as_of="2026-08-13").company_quality

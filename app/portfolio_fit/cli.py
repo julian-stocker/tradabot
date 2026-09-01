@@ -74,19 +74,11 @@ def _render_candidate(report: PortfolioFitReport) -> list[str]:
     if c.price is not None:
         out.append(f"  price                   ${c.price:,.2f}")
     if c.weighted_average_correlation is not None:
-        out.append(
-            f"  avg correlation         {c.weighted_average_correlation:.2f}"
-        )
+        out.append(f"  avg correlation         {c.weighted_average_correlation:.2f}")
     if c.max_correlation:
-        out.append(
-            f"  most similar holding    {c.max_correlation[0]} "
-            f"({c.max_correlation[1]:.2f})"
-        )
+        out.append(f"  most similar holding    {c.max_correlation[0]} ({c.max_correlation[1]:.2f})")
     if c.min_correlation:
-        out.append(
-            f"  least similar holding   {c.min_correlation[0]} "
-            f"({c.min_correlation[1]:.2f})"
-        )
+        out.append(f"  least similar holding   {c.min_correlation[0]} ({c.min_correlation[1]:.2f})")
     if c.context is not None:
         out += ["", "  COMPANY CONTEXT"]
         out.extend(_context_lines(c.context.as_dict(), indent="    ", full=True))
@@ -121,19 +113,13 @@ def _delta_rows(deltas: tuple[dict[str, Any], ...]) -> list[str]:
 
         change = row["delta"]
         shown = (
-            "  —"
-            if change is None
-            else (f"{change:+,.0f}" if money else f"{change * 100:+.1f}pp")
+            "  —" if change is None else (f"{change:+,.0f}" if money else f"{change * 100:+.1f}pp")
         )
-        rows.append(
-            f"{measure:<26}{fmt(row['before']):>12}{fmt(row['after']):>12}{shown:>12}"
-        )
+        rows.append(f"{measure:<26}{fmt(row['before']):>12}{fmt(row['after']):>12}{shown:>12}")
     return rows
 
 
-def _context_lines(
-    context: dict[str, Any] | None, *, indent: str, full: bool = False
-) -> list[str]:
+def _context_lines(context: dict[str, Any] | None, *, indent: str, full: bool = False) -> list[str]:
     """Render borrowed Advisor context. Never derives a figure of its own."""
     if context is None:
         return []
@@ -152,9 +138,7 @@ def _context_lines(
         labels = context.get("labels") or {}
         if labels:
             out.append(
-                indent
-                + "labels: "
-                + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
+                indent + "labels: " + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
             )
         out.append(f"{indent}company-analysis confidence: {context.get('confidence')}")
     else:

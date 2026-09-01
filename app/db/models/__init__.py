@@ -24,6 +24,7 @@ from app.db.models.paper_forward import (
     StrategyCandidate,
     StrategyEvaluation,
 )
+from app.db.models.registry import Company, Listing
 from app.db.models.research import BacktestRun, SignalOutcome, TradeOutcome
 from app.db.models.scanner import (
     ScanRun,
@@ -39,10 +40,12 @@ __all__ = [
     "BacktestRun",
     "BrokerCostProfile",
     "Candle",
+    "Company",
     "CorporateActionRow",
     "DecisionOutcome",
     "ExternalAccountConnection",
     "Instrument",
+    "Listing",
     "NotificationAttempt",
     "NotificationState",
     "OptionQuoteSnapshot",

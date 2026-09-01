@@ -154,9 +154,7 @@ class DeliveryLedger:
                 # An unreadable ledger is treated as empty. That risks one
                 # duplicate message; trusting a half-parsed file risks silently
                 # suppressing real alerts, which is the worse failure.
-                logger.warning(
-                    "discarding unreadable delivery ledger", reason=type(exc).__name__
-                )
+                logger.warning("discarding unreadable delivery ledger", reason=type(exc).__name__)
                 rows = {}
         self._rows = rows
         return rows

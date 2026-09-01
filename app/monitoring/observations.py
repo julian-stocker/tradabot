@@ -35,11 +35,7 @@ _MIN_SECTOR_MEMBERS = 3
 
 
 def _returns(closes: Sequence[float]) -> list[float]:
-    return [
-        closes[i] / closes[i - 1] - 1
-        for i in range(1, len(closes))
-        if closes[i - 1] > 0
-    ]
+    return [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0]
 
 
 def _annualised(returns: Sequence[float]) -> float | None:
@@ -79,9 +75,7 @@ class Bars:
         return self._closes
 
 
-def market_observation(
-    bars: Bars, as_of: str, *, trend_band: float
-) -> dict[str, Any]:
+def market_observation(bars: Bars, as_of: str, *, trend_band: float) -> dict[str, Any]:
     """The benchmark's regime, and the measurements behind it.
 
     Three states, derived from where the index sits relative to its 200-day
@@ -112,9 +106,7 @@ def market_observation(
     }
 
 
-def symbol_observation(
-    bars: Bars, benchmark: Bars, as_of: str
-) -> dict[str, Any] | None:
+def symbol_observation(bars: Bars, benchmark: Bars, as_of: str) -> dict[str, Any] | None:
     """Volume, volatility and relative strength for one symbol.
 
     Returns ``None`` when there is too little history to say anything, rather
@@ -144,9 +136,7 @@ def symbol_observation(
 
     return {
         "volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
-        "volatility_ratio": (
-            round(volatility_ratio, 3) if volatility_ratio is not None else None
-        ),
+        "volatility_ratio": (round(volatility_ratio, 3) if volatility_ratio is not None else None),
         "volatility_20d": round(short, 4) if short is not None else None,
         "relative_strength_252d": (
             round(relative_strength, 4) if relative_strength is not None else None
@@ -222,20 +212,14 @@ def portfolio_observation(report: Any) -> dict[str, Any]:
         "invested_pct": round(exposure.invested_pct, 4),
         "positions": sorted(exposure.weights),
         "weights": {s: round(w, 4) for s, w in sorted(exposure.weights.items())},
-        "sector_weights": {
-            s: round(w, 4) for s, w in sorted(exposure.sector_weights.items())
-        },
+        "sector_weights": {s: round(w, 4) for s, w in sorted(exposure.sector_weights.items())},
         "top3_pct": round(exposure.top3_pct, 4),
         "concentration": str(exposure.concentration),
         "average_correlation": (
-            round(risk.average_correlation, 4)
-            if risk.average_correlation is not None
-            else None
+            round(risk.average_correlation, 4) if risk.average_correlation is not None else None
         ),
         "annualised_volatility": (
-            round(risk.annualised_volatility, 4)
-            if risk.annualised_volatility is not None
-            else None
+            round(risk.annualised_volatility, 4) if risk.annualised_volatility is not None else None
         ),
     }
 

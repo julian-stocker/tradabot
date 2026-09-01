@@ -77,9 +77,7 @@ class EdgarClient:
         timeout: float = 60.0,
         retries: int = 3,
     ) -> None:
-        self._agent = user_agent or os.environ.get(
-            "TRADABOT_SEC_USER_AGENT", DEFAULT_USER_AGENT
-        )
+        self._agent = user_agent or os.environ.get("TRADABOT_SEC_USER_AGENT", DEFAULT_USER_AGENT)
         self._timeout = timeout
         self._retries = max(1, retries)
         self._last = 0.0
@@ -140,6 +138,25 @@ class EdgarClient:
     def companyfacts(self, cik: int) -> dict[str, Any]:
         """Every XBRL fact for one filer."""
         return self._get(COMPANYFACTS_URL.format(cik=cik))
+
+    def profile(self, cik: int) -> dict[str, str]:
+        """Entity name and SIC classification for one filer.
+
+        The SIC code is the SEC's own classification of what the company does.
+        It is the only sector signal Tradabot has that covers every filer it
+        ingests, it costs nothing extra, and it is the difference between
+        refusing to read a bank's balance sheet and reporting that Wells Fargo
+        carries an acceptable amount of debt.
+        """
+        payload = self._get(SUBMISSIONS_URL.format(cik=cik))
+        return {
+            "name": str(payload.get("name") or ""),
+            "sic": str(payload.get("sic") or ""),
+            "sic_description": str(payload.get("sicDescription") or ""),
+            "country": str(
+                (payload.get("addresses") or {}).get("business", {}).get("stateOrCountry") or ""
+            ),
+        }
 
     def acceptance_times(self, cik: int) -> dict[str, str]:
         """Accession -> acceptance timestamp for one filer.

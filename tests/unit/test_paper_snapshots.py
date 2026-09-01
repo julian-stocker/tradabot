@@ -122,8 +122,9 @@ class TestCannotTrade:
             for name in called
             if name.startswith(("get_", "submit", "cancel", "close", "replace"))
         }
-        assert vendor <= {"get_account", "get_all_positions", "get_orders",
-                          "get_secret_value"}, f"unexpected vendor calls: {vendor}"
+        assert vendor <= {"get_account", "get_all_positions", "get_orders", "get_secret_value"}, (
+            f"unexpected vendor calls: {vendor}"
+        )
 
     def test_a_snapshot_read_touches_nothing_else(self) -> None:
         client = FakeClient(positions=[position()])
@@ -149,9 +150,7 @@ class TestCannotTrade:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module]
             for name in names:
-                assert not name.startswith(("app.broker", "alpaca")), (
-                    f"{PROTOCOL} imports {name}"
-                )
+                assert not name.startswith(("app.broker", "alpaca")), f"{PROTOCOL} imports {name}"
 
     def test_the_adapter_satisfies_the_read_only_protocol(self) -> None:
         assert isinstance(reader(), PortfolioAccountReader)
@@ -163,9 +162,7 @@ class TestAccountIsolation:
         clients = {
             PaperAccountSlot.PAPER_1K: FakeClient(FakeAccount("PA111", "1000", "1000")),
             PaperAccountSlot.PAPER_3K: FakeClient(FakeAccount("PA333", "3000", "3000")),
-            PaperAccountSlot.PAPER_10K: FakeClient(
-                FakeAccount("PA101010", "10000", "10000")
-            ),
+            PaperAccountSlot.PAPER_10K: FakeClient(FakeAccount("PA101010", "10000", "10000")),
         }
         snaps = reader(clients).snapshots()
         assert [snaps[s].equity for s in ("PAPER_1K", "PAPER_3K", "PAPER_10K")] == [
@@ -218,8 +215,7 @@ class TestOrdinaryStates:
 
     def test_leverage_is_withheld_and_reported(self) -> None:
         """Two of three accounts are margin accounts; the experiment uses none."""
-        client = FakeClient(FakeAccount("PA333", equity="3000", cash="3000",
-                                        buying="12000"))
+        client = FakeClient(FakeAccount("PA333", equity="3000", cash="3000", buying="12000"))
         snapshot = reader({PaperAccountSlot.PAPER_3K: client}).snapshot("PAPER_3K")
         assert snapshot.broker_buying_power == 12000.0
         assert snapshot.usable_capital == 3000.0
@@ -238,5 +234,10 @@ class TestOrdinaryStates:
         """A defaulted zero basis renders as a 100% gain, which is invented."""
         held = SnapshotPosition("AAA", 3.0, 300.0, price=100.0)
         assert held.cost_basis is None
-        assert AccountSnapshot("PAPER_1K", "now", True,
-                               positions=(held,)).to_portfolio().positions[0].unrealised is None
+        assert (
+            AccountSnapshot("PAPER_1K", "now", True, positions=(held,))
+            .to_portfolio()
+            .positions[0]
+            .unrealised
+            is None
+        )

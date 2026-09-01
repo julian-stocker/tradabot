@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from itertools import pairwise
-from typing import Any
+from typing import Any, Final
 
 from app.advisor.facts import FactStore, ShareFamily
 from app.advisor.schemas import (
@@ -64,6 +64,67 @@ class PriceSeries:
         return sorted((d, c) for d, c in self.closes.items() if d <= as_of)
 
 
+@dataclass(frozen=True, slots=True)
+class MarketIdentity:
+    """Which price series a report may read, and what it may be compared to.
+
+    A report is about one **listing**, so its market data belongs to that
+    listing and to nothing else. Before this existed the Advisor was fed a bare
+    ticker and looked the price up by it, which meant a Xetra line reached the
+    US ADR's series: ``SAP.DE`` carried a USD price, a SPY-relative return and
+    ``HIGH`` confidence, and the only thing standing between that and a reader
+    was the renderer choosing not to print it. Worse, ``CNR.TO`` -- Canadian
+    National -- reached the series of ``CNR``, *Core Natural Resources*, and
+    produced an internally consistent valuation of a different company.
+
+    So absence is represented, not worked around. ``series`` is ``None`` when
+    the listing has no prices of its own, and ``benchmark`` is ``None`` when no
+    benchmark has been validated for its market. Neither is ever filled in from
+    a bare ticker, another venue, an ADR or a primary line: the report simply
+    does without the fields those inputs would have produced.
+    """
+
+    series: str | None
+    """Key into the price map, or ``None`` when this listing has no prices."""
+    benchmark: str | None = None
+    """Key of the validated benchmark for this listing's market, or ``None``."""
+    unit_mismatch: str | None = None
+    """Why this listing's price may not be divided into its company's reported
+    figures. Currency, today: Novo Nordisk trades in USD and reports in DKK, so
+    price over earnings is 1.99x -- a number that looks like a bargain and is a
+    unit error. ``None`` when price and filings share a currency."""
+
+    @property
+    def comparable(self) -> bool:
+        """Whether a relative-strength reading is meaningful at all.
+
+        False without a benchmark, and false when the listing *is* the
+        benchmark: a security's excess return over itself is zero by
+        construction, and printing ``+0.0%`` invites a reader to interpret an
+        identity as a finding.
+        """
+        return (
+            self.series is not None and self.benchmark is not None and self.series != self.benchmark
+        )
+
+
+UNPRICED: Final[MarketIdentity] = MarketIdentity(series=None, benchmark=None)
+"""A listing Tradabot holds no market data for. Every market-derived field on
+its report is unavailable, with a stated reason."""
+
+
+def _no_price_reason(market: MarketIdentity) -> str:
+    """Why a price-derived field is absent, distinguishing the two causes.
+
+    "Tradabot holds no series for this listing" and "the series exists and is
+    empty at this date" are different states, and a report that flattened them
+    would leave a reader unable to tell an unsupported venue from a stale sync.
+    """
+    if market.series is None:
+        return "no market data for this listing; prices are never taken from another"
+    return "no price history"
+
+
 def _metric(name: str, result: Any, reason: str | None = None) -> Metric:
     if result is None or result.value is None:
         return Metric(name, None, DenominatorBasis.UNAVAILABLE, reason or "not reported")
@@ -111,22 +172,59 @@ class AdvisorService:
         prices: Mapping[str, PriceSeries],
         sectors: Mapping[str, str] | None = None,
         benchmark: str = "SPY",
+        company_sectors: Mapping[str, str] | None = None,
     ) -> None:
         self._facts = facts
         self._prices = prices
         self._sectors = sectors or {}
         self._benchmark = benchmark
+        self._company_sectors = company_sectors or {}
+        """Sector by company key, derived from the SEC's SIC classification.
 
-    def analyse(self, symbol: str, as_of: str | None = None) -> AdvisorReport:
+        A **fallback**, consulted only where the curated map is silent. SIC and
+        the curated map disagree on four of the fifty-two -- it files Visa and
+        Mastercard as business services and UnitedHealth as a medical service
+        plan -- and letting a derived signal overrule a human judgement would
+        change validated results as a side effect of adding coverage.
+
+        What it does fix is the silence: a hundred and twenty-two US listings
+        and every foreign issuer had no classification at all, so Wells Fargo
+        was read as a manufacturer with an acceptable amount of debt."""
+
+    def analyse(
+        self,
+        symbol: str,
+        as_of: str | None = None,
+        company_key: str | None = None,
+        market: MarketIdentity | None = None,
+    ) -> AdvisorReport:
+        """One factual report.
+
+        ``symbol`` names the listing being reported on. ``company_key`` names
+        the *reporting entity* whose filings are used, and ``market`` names the
+        *price series* the report may read and the benchmark it may compare to.
+        All three are separate because they vary independently: two listings of
+        one issuer share filings and must not share prices, and a listing may
+        have filings without having prices at all.
+
+        ``market`` defaults to :class:`MarketIdentity` over ``symbol`` with this
+        service's configured benchmark, which is what a caller holding only a
+        bare ticker means -- the US line that ticker names. A caller that knows
+        about listings passes one explicitly, and passes :data:`UNPRICED` when
+        the listing has no prices, rather than letting the symbol stand in.
+        """
         symbol = symbol.upper()
+        facts_key = company_key or symbol
+        identity = market if market is not None else MarketIdentity(symbol, self._benchmark)
         when = as_of or datetime.now(UTC).date().isoformat()
-        sector = self._sectors.get(symbol, "unknown")
+        # Curated first, derived second, unknown last.
+        sector = self._sectors.get(symbol) or self._company_sectors.get(facts_key, "unknown")
         financial = sector in _FINANCIAL_SECTORS
 
-        quality, qconf = self._company_quality(symbol, when, financial)
-        valuation = self._valuation(symbol, when)
-        market = self._market_position(symbol, when)
-        risks = self._risks(quality, valuation, market, financial)
+        quality, qconf = self._company_quality(symbol, when, financial, facts_key)
+        valuation = self._valuation(facts_key, when, identity)
+        position = self._market_position(when, identity)
+        risks = self._risks(quality, valuation, position, financial)
         # Two distinct readings, neither of which inflates the other.
         #
         # `company_analysis` covers the four sections a factual company view
@@ -139,39 +237,53 @@ class AdvisorService:
         core = [s.confidence for s in quality if s.name != "CAPITAL STRUCTURE"]
         confidence = {
             "company_quality": qconf,
-            "company_analysis": weakest(*core, valuation.confidence, market.confidence),
+            "company_analysis": weakest(*core, valuation.confidence, position.confidence),
             "valuation": valuation.confidence,
-            "market_position": market.confidence,
+            "market_position": position.confidence,
         }
-        confidence["overall"] = weakest(
-            qconf, valuation.confidence, market.confidence
-        )
+        confidence["overall"] = weakest(qconf, valuation.confidence, position.confidence)
         return AdvisorReport(
             symbol=symbol,
             as_of=when,
-            profile=self._profile(symbol, when, sector, valuation),
+            profile=self._profile(symbol, when, sector, valuation, identity),
             company_quality=quality,
             valuation=valuation,
-            market_position=market,
+            market_position=position,
             risks=risks,
             horizon_data_support=self._horizons(),
-            summary=self._summary(symbol, quality, valuation, market),
+            summary=self._summary(symbol, quality, valuation, position),
             confidence=confidence,
         )
 
     # ---------------------------------------------------------------- sections
+    def _series(self, market: MarketIdentity) -> PriceSeries | None:
+        """The one price series this report is allowed to read.
+
+        The single place a :class:`MarketIdentity` becomes prices. An unpriced
+        listing returns ``None`` here and every market-derived field downstream
+        is absent as a consequence, rather than each of them having to remember
+        not to fall back to the bare ticker.
+        """
+        return self._prices.get(market.series) if market.series is not None else None
+
     def _profile(
-        self, symbol: str, when: str, sector: str, valuation: Section
+        self,
+        symbol: str,
+        when: str,
+        sector: str,
+        valuation: Section,
+        market: MarketIdentity,
     ) -> Section:
-        series = self._prices.get(symbol)
+        series = self._series(market)
         history = series.upto(when) if series else []
         mcap = valuation.metrics.get("market_cap")
         return Section(
             name="COMPANY PROFILE",
             metrics={
                 "price": Metric(
-                    "price", history[-1][1] if history else None,
-                    unavailable_reason=None if history else "no price history",
+                    "price",
+                    history[-1][1] if history else None,
+                    unavailable_reason=None if history else _no_price_reason(market),
                 ),
                 "market_cap": mcap or Metric("market_cap", None),
             },
@@ -186,19 +298,22 @@ class AdvisorService:
         )
 
     def _company_quality(
-        self, symbol: str, when: str, financial: bool
+        self, symbol: str, when: str, financial: bool, facts_key: str | None = None
     ) -> tuple[tuple[Section, ...], Confidence]:
         f = self._facts
-        rev, eps = f.ttm(symbol, "revenue", when), f.ttm(symbol, "eps_diluted", when)
-        oi = f.ttm(symbol, "operating_income", when)
-        ocf, capex = f.ttm(symbol, "operating_cash_flow", when), f.ttm(symbol, "capex", when)
-        gp = f.ttm(symbol, "gross_profit", when)
-        cash, ltd = f.instant(symbol, "cash", when), f.instant(symbol, "long_term_debt", when)
+        # Facts are read by company identity; `symbol` continues to name the
+        # listing whose prices are used elsewhere in the report.
+        key = facts_key or symbol
+        rev, eps = f.ttm(key, "revenue", when), f.ttm(key, "eps_diluted", when)
+        oi = f.ttm(key, "operating_income", when)
+        ocf, capex = f.ttm(key, "operating_cash_flow", when), f.ttm(key, "capex", when)
+        gp = f.ttm(key, "gross_profit", when)
+        cash, ltd = f.instant(key, "cash", when), f.instant(key, "long_term_debt", when)
         std, equity = (
-            f.instant(symbol, "short_term_debt", when),
-            f.instant(symbol, "equity", when),
+            f.instant(key, "short_term_debt", when),
+            f.instant(key, "equity", when),
         )
-        shares = f.instant(symbol, "shares_outstanding", when)
+        shares = f.instant(key, "shares_outstanding", when)
 
         fcf = None
         if ocf.value is not None and capex.value is not None:
@@ -229,9 +344,9 @@ class AdvisorService:
                     unavailable_reason=margin_reason,
                 ),
             },
-            confidence=Confidence.INSUFFICIENT if financial else (
-                Confidence.HIGH if oi.value is not None else Confidence.LOW
-            ),
+            confidence=Confidence.INSUFFICIENT
+            if financial
+            else (Confidence.HIGH if oi.value is not None else Confidence.LOW),
             notes=(
                 ("bank and insurer margins are not comparable to industrial companies",)
                 if financial
@@ -260,9 +375,7 @@ class AdvisorService:
             confidence=Confidence.INSUFFICIENT
             if financial or fcf is None
             else (
-                Confidence.MEDIUM
-                if ocf.basis is DenominatorBasis.FY_FALLBACK
-                else Confidence.HIGH
+                Confidence.MEDIUM if ocf.basis is DenominatorBasis.FY_FALLBACK else Confidence.HIGH
             ),
             confidence_reasons=(
                 ("free cash flow uses the annual figure, not a true TTM",)
@@ -293,16 +406,16 @@ class AdvisorService:
                 "equity": _metric("equity", equity),
             },
             labels={"assessment": balance_label},
-            confidence=Confidence.INSUFFICIENT
-            if net is None or financial
-            else Confidence.HIGH,
+            confidence=Confidence.INSUFFICIENT if net is None or financial else Confidence.HIGH,
         )
-        capital = self._capital_structure(symbol, when, shares)
+        capital = self._capital_structure(symbol, when, shares, key)
         sections = (growth, profitability, cash_section, balance, capital)
         overall = weakest(*(s.confidence for s in sections))
         return sections, overall
 
-    def _capital_structure(self, symbol: str, when: str, shares: Any) -> Section:
+    def _capital_structure(
+        self, symbol: str, when: str, shares: Any, facts_key: str | None = None
+    ) -> Section:
         """Dilution from period-end share counts, refusing when a split is implied.
 
         Period-end shares outstanding -- not weighted-average diluted shares --
@@ -313,7 +426,7 @@ class AdvisorService:
         SEC share counts are as-reported and NOT split-adjusted, so a 4:1 split
         looks like 300% dilution. Any implied split withholds the judgement.
         """
-        history = self._share_history(symbol, when)
+        history = self._share_history(symbol, when, facts_key)
         metrics = {"shares_outstanding": _metric("shares_outstanding", shares)}
         if len(history) < _MIN_SHARE_OBSERVATIONS:
             return Section(
@@ -379,9 +492,7 @@ class AdvisorService:
         if span >= 1 and window[-1 - span][1] > 0:
             annualised = (window[-1][1] / window[-1 - span][1]) ** (1 / span) - 1
         metrics["share_count_yoy"] = Metric("share_count_yoy", yoy)
-        metrics[f"share_count_cagr_{span}y"] = Metric(
-            f"share_count_cagr_{span}y", annualised
-        )
+        metrics[f"share_count_cagr_{span}y"] = Metric(f"share_count_cagr_{span}y", annualised)
         label = "INSUFFICIENT_DATA"
         if annualised is not None:
             if annualised < _BUYBACK_THRESHOLD:
@@ -413,7 +524,9 @@ class AdvisorService:
             confidence_reasons=reasons,
         )
 
-    def _share_history(self, symbol: str, when: str) -> list[tuple[str, float]]:
+    def _share_history(
+        self, symbol: str, when: str, facts_key: str | None = None
+    ) -> list[tuple[str, float]]:
         """A fiscal-year chain of PERIOD_END share counts, oldest first.
 
         Built by walking back from the newest observation and taking the one
@@ -421,7 +534,7 @@ class AdvisorService:
         a year apart are skipped rather than compared, which is precisely what
         the calendar-year bucketing used to get wrong.
         """
-        series = self._facts.share_series(symbol, when, ShareFamily.PERIOD_END)
+        series = self._facts.share_series(facts_key or symbol, when, ShareFamily.PERIOD_END)
         if not series:
             return []
         chain: list[tuple[str, float]] = [(series[-1][0], series[-1][1])]
@@ -433,22 +546,28 @@ class AdvisorService:
                 anchor = date.fromisoformat(period_end)
         return list(reversed(chain))
 
-    def _valuation(self, symbol: str, when: str) -> Section:
+    def _valuation(self, key: str, when: str, market: MarketIdentity) -> Section:
+        """Price over fundamentals, where both belong to the thing being reported.
+
+        ``key`` is the company; ``market`` is the listing. Both halves used to
+        be read by the bare ticker, so ``CNR.TO`` -- Canadian National -- was
+        valued at Core Natural Resources' price against Core Natural Resources'
+        revenue, inside a report whose growth section was Canadian National's.
+        Every figure was reproducible and the company was the wrong one.
+        """
         f = self._facts
-        series = self._prices.get(symbol)
+        series = self._series(market)
         history = series.upto(when) if series else []
         price = history[-1][1] if history else None
-        shares = f.instant(symbol, "shares_outstanding", when)
-        rev = f.ttm(symbol, "revenue", when)
-        eps = f.ttm(symbol, "eps_diluted", when)
-        ocf, capex = f.ttm(symbol, "operating_cash_flow", when), f.ttm(symbol, "capex", when)
-        fcf = (
-            ocf.value - capex.value
-            if ocf.value is not None and capex.value is not None
-            else None
-        )
-        split_suspect = self._split_suspect(symbol, when)
+        shares = f.instant(key, "shares_outstanding", when)
+        rev = f.ttm(key, "revenue", when)
+        eps = f.ttm(key, "eps_diluted", when)
+        ocf, capex = f.ttm(key, "operating_cash_flow", when), f.ttm(key, "capex", when)
+        fcf = ocf.value - capex.value if ocf.value is not None and capex.value is not None else None
+        split_suspect = self._split_suspect(key, when)
         reasons: list[str] = []
+        if price is None:
+            reasons.append(_no_price_reason(market))
         if split_suspect:
             reasons.append(
                 "as-reported share count implies a stock split; per-share valuation withheld"
@@ -458,27 +577,43 @@ class AdvisorService:
             if price is not None and shares.value is not None and not split_suspect
             else None
         )
-        pe = _ratio(price, eps.value) if not split_suspect else None
-        ps = _ratio(mcap, rev.value)
-        pfcf = _ratio(mcap, fcf)
-        percentile = self._ps_percentile(symbol, when, ps)
-        if percentile is None:
+        # A market capitalisation is a price times a share count, so it stays in
+        # the price's own currency and survives a mismatch. Every ratio below
+        # divides that price by a reported figure, and those do not.
+        mixed = market.unit_mismatch
+        if mixed is not None:
+            reasons.append(mixed)
+        pe = _ratio(price, eps.value) if not split_suspect and mixed is None else None
+        ps = _ratio(mcap, rev.value) if mixed is None else None
+        pfcf = _ratio(mcap, fcf) if mixed is None else None
+        percentile = self._ps_percentile(key, when, ps, market)
+        if percentile is None and price is not None and mixed is None:
             reasons.append("insufficient valuation history for a percentile")
         if ocf.basis is DenominatorBasis.FY_FALLBACK:
             reasons.append("cash-flow denominator is annual, not TTM")
         confidence = Confidence.INSUFFICIENT
-        if mcap is not None:
+        if mcap is not None and mixed is None:
             confidence = Confidence.MEDIUM if percentile is None else Confidence.HIGH
         return Section(
             name="VALUATION",
             metrics={
                 "market_cap": Metric("market_cap", mcap),
-                "pe_ttm": Metric("pe_ttm", pe, eps.basis),
-                "ps_ttm": Metric("ps_ttm", ps, rev.basis),
-                "p_fcf": Metric("p_fcf", pfcf, ocf.basis),
-                "earnings_yield": Metric("earnings_yield", _ratio(eps.value, price)),
-                "fcf_yield": Metric("fcf_yield", _ratio(fcf, mcap)),
-                "ps_percentile_own_history": Metric("ps_percentile_own_history", percentile),
+                "pe_ttm": Metric("pe_ttm", pe, eps.basis, mixed),
+                "ps_ttm": Metric("ps_ttm", ps, rev.basis, mixed),
+                "p_fcf": Metric("p_fcf", pfcf, ocf.basis, mixed),
+                "earnings_yield": Metric(
+                    "earnings_yield",
+                    _ratio(eps.value, price) if mixed is None else None,
+                    unavailable_reason=mixed,
+                ),
+                "fcf_yield": Metric(
+                    "fcf_yield",
+                    _ratio(fcf, mcap) if mixed is None else None,
+                    unavailable_reason=mixed,
+                ),
+                "ps_percentile_own_history": Metric(
+                    "ps_percentile_own_history", percentile, unavailable_reason=mixed
+                ),
             },
             labels={"ps_context": str(_context(percentile))},
             confidence=confidence,
@@ -489,17 +624,23 @@ class AdvisorService:
             ),
         )
 
-    def _split_suspect(self, symbol: str, when: str) -> bool:
-        quarters, _prov = self._facts.quarterlies(symbol, "eps_diluted", when)
-        counts = self._facts.instant(symbol, "shares_outstanding", when)
+    def _split_suspect(self, key: str, when: str) -> bool:
+        quarters, _prov = self._facts.quarterlies(key, "eps_diluted", when)
+        counts = self._facts.instant(key, "shares_outstanding", when)
         if counts.value is None or not quarters:
             return False
         return False
 
-    def _ps_percentile(self, symbol: str, when: str, current: float | None) -> float | None:
+    def _ps_percentile(
+        self,
+        key: str,
+        when: str,
+        current: float | None,
+        market: MarketIdentity,
+    ) -> float | None:
         if current is None or current <= 0:
             return None
-        series = self._prices.get(symbol)
+        series = self._series(market)
         if series is None:
             return None
         history = series.upto(when)
@@ -510,8 +651,8 @@ class AdvisorService:
         for day, close in sorted(by_month.values()):
             if day >= when:
                 continue
-            shares = self._facts.instant(symbol, "shares_outstanding", day)
-            revenue = self._facts.ttm(symbol, "revenue", day)
+            shares = self._facts.instant(key, "shares_outstanding", day)
+            revenue = self._facts.ttm(key, "revenue", day)
             value = _ratio(
                 close * shares.value if shares.value is not None else None, revenue.value
             )
@@ -521,26 +662,65 @@ class AdvisorService:
             return None
         return sum(1 for v in observations if v <= current) / len(observations)
 
-    def _market_position(self, symbol: str, when: str) -> Section:
-        series = self._prices.get(symbol)
-        bench = self._prices.get(self._benchmark)
+    def _relative_strength(
+        self, own: float | None, when: str, market: MarketIdentity
+    ) -> tuple[float | None, str | None]:
+        """One year of excess return over a validated benchmark, or why not.
+
+        Three distinct absences, kept distinct because they call for different
+        wording on the card: no benchmark exists for this market, the listing
+        *is* the benchmark, or the benchmark itself is too short to compare to.
+        """
+        if market.benchmark is None:
+            return None, (
+                "no benchmark has been validated for this listing's market; "
+                "SPY was validated against US listings and means nothing here"
+            )
+        if market.series == market.benchmark:
+            return None, (
+                "this listing is the benchmark; its excess return over itself "
+                "is zero by construction"
+            )
+        bench = self._prices.get(market.benchmark)
+        bench_closes = [c for _d, c in bench.upto(when)] if bench else []
+        reference = (
+            bench_closes[-1] / bench_closes[-_YEAR_SESSIONS - 1] - 1
+            if len(bench_closes) > _YEAR_SESSIONS
+            else None
+        )
+        if own is None or reference is None:
+            return None, "not enough benchmark history for a one-year comparison"
+        return own - reference, None
+
+    def _market_position(self, when: str, market: MarketIdentity) -> Section:
+        """How the *listing* has traded. Never how some other listing traded.
+
+        Both inputs are named by :class:`MarketIdentity`: the series is the
+        listing's own, and the benchmark is one validated for the listing's
+        market. Outside the US no benchmark has been validated, so relative
+        strength is absent with a reason rather than silently measured against
+        SPY -- which would render as an ordinary percentage while comparing a
+        different currency and a different trading day.
+        """
+        series = self._series(market)
         history = series.upto(when) if series else []
         if len(history) < _MIN_MARKET_SESSIONS:
             return Section(
                 name="MARKET POSITION",
                 confidence=Confidence.INSUFFICIENT,
-                confidence_reasons=("fewer than 220 sessions of price history",),
+                confidence_reasons=(
+                    _no_price_reason(market)
+                    if market.series is None or not history
+                    else "fewer than 220 sessions of price history",
+                ),
             )
         closes = [c for _d, c in history]
 
         def ret(seq: list[float], span: int) -> float | None:
             return seq[-1] / seq[-span - 1] - 1 if len(seq) > span else None
 
-        bench_closes = [c for _d, c in bench.upto(when)] if bench else []
-        rs = None
-        own, market = ret(closes, _YEAR_SESSIONS), ret(bench_closes, _YEAR_SESSIONS)
-        if own is not None and market is not None:
-            rs = own - market
+        own = ret(closes, _YEAR_SESSIONS)
+        rs, rs_reason = self._relative_strength(own, when, market)
         ma200 = st.mean(closes[-_MA_SESSIONS:])
         peak = max(closes[-_YEAR_SESSIONS:]) if len(closes) >= _YEAR_SESSIONS else max(closes)
         return Section(
@@ -549,13 +729,11 @@ class AdvisorService:
                 "return_20d": Metric("return_20d", ret(closes, 20)),
                 "return_60d": Metric("return_60d", ret(closes, 60)),
                 "return_252d": Metric("return_252d", own),
-                "relative_strength_252d": Metric("relative_strength_252d", rs),
-                "distance_from_ma200": Metric(
-                    "distance_from_ma200", closes[-1] / ma200 - 1
+                "relative_strength_252d": Metric(
+                    "relative_strength_252d", rs, unavailable_reason=rs_reason
                 ),
-                "drawdown_from_252d_high": Metric(
-                    "drawdown_from_252d_high", closes[-1] / peak - 1
-                ),
+                "distance_from_ma200": Metric("distance_from_ma200", closes[-1] / ma200 - 1),
+                "drawdown_from_252d_high": Metric("drawdown_from_252d_high", closes[-1] / peak - 1),
             },
             confidence=Confidence.HIGH,
             notes=("describes the STOCK, not the company",),
@@ -581,9 +759,7 @@ class AdvisorService:
             fcf = cash_section.metrics.get("free_cash_flow")
             if fcf is not None and fcf.available and fcf.value is not None and fcf.value < 0:
                 business.append("free cash flow is negative")
-            if cash_section.labels.get("denominator_basis") == str(
-                DenominatorBasis.FY_FALLBACK
-            ):
+            if cash_section.labels.get("denominator_basis") == str(DenominatorBasis.FY_FALLBACK):
                 data.append("cash-flow figures use the annual filing, not a true TTM")
         context = valuation.labels.get("ps_context", "")
         if context in {str(ValuationContext.HIGH), str(ValuationContext.VERY_HIGH)}:

@@ -253,10 +253,7 @@ class ChangeEvent:
         Cooldown and deduplication are applied separately, by the engine: an
         event can be material and still not worth repeating this hour.
         """
-        return (
-            MATERIALITY_ORDER[str(self.materiality)]
-            >= MATERIALITY_ORDER[str(REPORTABLE_FROM)]
-        )
+        return MATERIALITY_ORDER[str(self.materiality)] >= MATERIALITY_ORDER[str(REPORTABLE_FROM)]
 
     def key(self) -> str:
         """Deduplication identity, derived when one was not supplied."""

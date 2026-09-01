@@ -92,9 +92,7 @@ class Portfolio:
     def weight_of(self, symbol: str) -> float:
         if self.equity <= 0:
             return 0.0
-        return sum(
-            p.market_value for p in self.positions if p.symbol == symbol
-        ) / self.equity
+        return sum(p.market_value for p in self.positions if p.symbol == symbol) / self.equity
 
     def with_added(self, symbol: str, amount: float, price: float) -> Portfolio:
         """A hypothetical portfolio after spending ``amount`` on ``symbol``.
@@ -110,9 +108,7 @@ class Portfolio:
         added = False
         for p in self.positions:
             if p.symbol == symbol:
-                merged.append(
-                    Position(symbol, p.quantity + quantity, price, p.cost_basis)
-                )
+                merged.append(Position(symbol, p.quantity + quantity, price, p.cost_basis))
                 added = True
             else:
                 merged.append(p)
@@ -180,9 +176,7 @@ class CandidateFit:
         """
         if self.after is None:
             return ()
-        sector_keys = sorted(
-            set(self.before.sector_weights) | set(self.after.sector_weights)
-        )
+        sector_keys = sorted(set(self.before.sector_weights) | set(self.after.sector_weights))
         rows: list[dict[str, Any]] = [
             _delta("cash", self.before.cash, self.after.cash),
             _delta("invested_pct", self.before.invested_pct, self.after.invested_pct),

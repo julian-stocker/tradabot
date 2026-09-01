@@ -43,8 +43,8 @@ from app.fundamentals.client import EdgarClient, EdgarUnavailableError
 from app.fundamentals.concepts import (
     CONCEPTS,
     FACT_COLUMNS,
-    METRIC_BY_CONCEPT,
     TAXONOMIES,
+    metric_for,
 )
 
 logger = get_logger(__name__)
@@ -137,7 +137,9 @@ def _extract(payload: dict[str, Any], accepted: dict[str, str]) -> list[dict[str
     rows: list[dict[str, Any]] = []
     for taxonomy in TAXONOMIES:
         for concept, body in facts.get(taxonomy, {}).items():
-            metric = METRIC_BY_CONCEPT.get(concept)
+            # Scoped to the taxonomy that published it: an ifrs-full tag must
+            # not inherit a us-gaap meaning because the names coincide.
+            metric = metric_for(taxonomy, concept)
             if metric is None:
                 continue
             for unit, entries in (body.get("units") or {}).items():
@@ -185,8 +187,9 @@ def _load_symbol(
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("discarding unreadable cache entry", symbol=symbol,
-                           reason=type(exc).__name__)
+            logger.warning(
+                "discarding unreadable cache entry", symbol=symbol, reason=type(exc).__name__
+            )
         else:
             rows = list(cached.get("facts", []))
             return (
@@ -223,9 +226,7 @@ def _load_symbol(
     # entry that a later run would trust.
     tmp.replace(path)
     return (
-        SymbolOutcome(
-            symbol, cik, "FETCHED", len(rows), sum(1 for r in rows if r.get("accepted"))
-        ),
+        SymbolOutcome(symbol, cik, "FETCHED", len(rows), sum(1 for r in rows if r.get("accepted"))),
         rows,
     )
 

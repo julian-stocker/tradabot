@@ -66,11 +66,7 @@ _CASH_ONLY = "CASH ONLY"
 
 
 def _returns(closes: Sequence[float]) -> list[float]:
-    return [
-        closes[i] / closes[i - 1] - 1
-        for i in range(1, len(closes))
-        if closes[i - 1] > 0
-    ]
+    return [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0]
 
 
 def _correlation(a: Sequence[float], b: Sequence[float]) -> float | None:
@@ -197,9 +193,7 @@ class PortfolioFitService:
             s: sum(p.market_value for p in portfolio.positions if p.symbol == s) / equity
             for s in series
         }
-        combined = [
-            sum(weights[s] * series[s][-n:][i] for s in series) for i in range(n)
-        ]
+        combined = [sum(weights[s] * series[s][-n:][i] for s in series) for i in range(n)]
         vol = st.pstdev(combined) * math.sqrt(_TRADING_DAYS) if n > 1 else None
         equity_curve = [1.0]
         for step in combined:
@@ -276,9 +270,7 @@ class PortfolioFitService:
                     "symbols": sorted(members),
                     "weight": sum(exposure.weights.get(s, 0.0) for s in members),
                     "max_correlation": peak,
-                    "overlap": (
-                        "EXTREME_OVERLAP" if peak >= _CORR_P99 else "HIGH_OVERLAP"
-                    ),
+                    "overlap": ("EXTREME_OVERLAP" if peak >= _CORR_P99 else "HIGH_OVERLAP"),
                 }
             )
         return sorted(out, key=lambda c: -float(c["weight"]))  # type: ignore[arg-type]
@@ -310,9 +302,9 @@ class PortfolioFitService:
         if correlations and before.equity > 0:
             total = sum(before.weights.get(s, 0.0) for s in correlations)
             if total > 0:
-                weighted = sum(
-                    before.weights.get(s, 0.0) * c for s, c in correlations.items()
-                ) / total
+                weighted = (
+                    sum(before.weights.get(s, 0.0) * c for s, c in correlations.items()) / total
+                )
         ordered = sorted(correlations.items(), key=lambda kv: -kv[1])
 
         after = after_risk = None
@@ -403,9 +395,7 @@ class PortfolioFitService:
                     f"{sector_after * 100:.1f}%"
                 )
         else:
-            reasons.append(
-                "no hypothetical amount supplied, so after-weights are not computed"
-            )
+            reasons.append("no hypothetical amount supplied, so after-weights are not computed")
         return state, tuple(reasons)
 
     # ------------------------------------------------------------ report
@@ -436,11 +426,7 @@ class PortfolioFitService:
             }
             for p in sorted(portfolio.positions, key=lambda x: -x.market_value)
         )
-        fit = (
-            self.candidate_fit(portfolio, candidate, when, amount)
-            if candidate
-            else None
-        )
+        fit = self.candidate_fit(portfolio, candidate, when, amount) if candidate else None
         reasons: list[str] = []
         if not portfolio.positions:
             # Nothing about "100% cash, no holdings" is uncertain, so the report
@@ -454,9 +440,7 @@ class PortfolioFitService:
                 holdings_detail=detail,
                 candidate=fit,
                 confidence=FitConfidence.HIGH,
-                confidence_reasons=(
-                    "the account holds only cash; its exposure is fully known",
-                ),
+                confidence_reasons=("the account holds only cash; its exposure is fully known",),
             )
         history = (
             FitConfidence.HIGH
@@ -473,9 +457,7 @@ class PortfolioFitService:
             sector_conf = FitConfidence.LOW
             reasons.append(f"{len(unknown)} holdings have no sector mapping")
         else:
-            reasons.append(
-                "sector labels are proxy-derived and are not an official classification"
-            )
+            reasons.append("sector labels are proxy-derived and are not an official classification")
         return PortfolioFitReport(
             portfolio=portfolio.name,
             as_of=when,

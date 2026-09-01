@@ -139,9 +139,7 @@ def detect_sector_move(
             kind=EventKind.SECTOR_MOVE,
             occurred_at=now,
             subject=sector,
-            previous_state=(
-                None if previous is None else f"5d {_pct(previous.get('return_5d'))}"
-            ),
+            previous_state=(None if previous is None else f"5d {_pct(previous.get('return_5d'))}"),
             current_state=f"5d {_pct(move)}",
             materiality=band,
             summary=(
@@ -187,9 +185,7 @@ def detect_symbol(
 
     volume = current.get("volume_ratio")
     if volume is not None:
-        band = rules.band(
-            volume, rules.VOLUME_RATIO_NOTABLE, rules.VOLUME_RATIO_SIGNIFICANT
-        )
+        band = rules.band(volume, rules.VOLUME_RATIO_NOTABLE, rules.VOLUME_RATIO_SIGNIFICANT)
         # Only an *elevated* ratio is unusual. A quiet session is common and
         # uninformative, and banding on magnitude alone would report both.
         if band is not Materiality.ROUTINE and volume > 1:
@@ -199,16 +195,11 @@ def detect_symbol(
                     occurred_at=now,
                     subject=symbol,
                     previous_state=(
-                        None
-                        if previous is None
-                        else f"{previous.get('volume_ratio')}x median"
+                        None if previous is None else f"{previous.get('volume_ratio')}x median"
                     ),
                     current_state=f"{volume:.1f}x median",
                     materiality=band,
-                    summary=(
-                        f"{symbol} traded {volume:.1f} times its 20-session median "
-                        f"volume."
-                    ),
+                    summary=(f"{symbol} traded {volume:.1f} times its 20-session median volume."),
                     evidence=(
                         Evidence(
                             "volume_ratio",
@@ -240,9 +231,7 @@ def detect_symbol(
                     occurred_at=now,
                     subject=symbol,
                     previous_state=(
-                        None
-                        if previous is None
-                        else f"{previous.get('volatility_ratio')}x"
+                        None if previous is None else f"{previous.get('volatility_ratio')}x"
                     ),
                     current_state=f"{volatility:.1f}x",
                     materiality=band,
@@ -254,9 +243,7 @@ def detect_symbol(
                     evidence=(
                         Evidence(
                             "volatility_ratio",
-                            None
-                            if previous is None
-                            else previous.get("volatility_ratio"),
+                            None if previous is None else previous.get("volatility_ratio"),
                             volatility,
                             unit="x one-year",
                             threshold=rules.VOLATILITY_RATIO_NOTABLE,
@@ -305,8 +292,7 @@ def detect_symbol(
                         provenance=(Provenance(PRICE_SOURCE, as_of),),
                         scope=scope,
                         dedup_key=(
-                            f"RELATIVE_STRENGTH:{symbol}:"
-                            f"{'ahead' if crossed_up else 'behind'}"
+                            f"RELATIVE_STRENGTH:{symbol}:{'ahead' if crossed_up else 'behind'}"
                         ),
                     )
                 )
@@ -353,9 +339,7 @@ def detect_company(
                 previous_state=str(previous.get("latest_form") or "none"),
                 current_state=form,
                 materiality=band,
-                summary=(
-                    f"{symbol} filed a {form} on {current.get('latest_filed')}."
-                ),
+                summary=(f"{symbol} filed a {form} on {current.get('latest_filed')}."),
                 evidence=(
                     Evidence(
                         "accession",
@@ -420,12 +404,9 @@ def detect_company(
                 current_state=str(is_conf),
                 materiality=Materiality.NOTABLE,
                 summary=(
-                    f"Company-analysis confidence for {symbol} moved from {was_conf} "
-                    f"to {is_conf}."
+                    f"Company-analysis confidence for {symbol} moved from {was_conf} to {is_conf}."
                 ),
-                evidence=(
-                    Evidence("company_analysis_confidence", was_conf, is_conf),
-                ),
+                evidence=(Evidence("company_analysis_confidence", was_conf, is_conf),),
                 confidence=reported_confidence,
                 provenance=(Provenance(ADVISOR_SOURCE, as_of),),
                 scope=scope,
@@ -436,8 +417,7 @@ def detect_company(
     for name in sorted(
         k
         for k in current
-        if k.startswith("metric_")
-        and k.removeprefix("metric_") in rules.FUNDAMENTAL_METRICS
+        if k.startswith("metric_") and k.removeprefix("metric_") in rules.FUNDAMENTAL_METRICS
     ):
         was, is_now = previous.get(name), current.get(name)
         change = _relative_change(was, is_now)
@@ -505,9 +485,7 @@ def detect_portfolio(
         return []
     scope = Scope(ScopeKind.PORTFOLIO, account=account)
     source = (Provenance(PORTFOLIO_SOURCE, as_of, f"account {account}"),)
-    events = _holding_events(
-        account, previous, current, now=now, scope=scope, source=source
-    )
+    events = _holding_events(account, previous, current, now=now, scope=scope, source=source)
     events.extend(
         _shape_events(
             account,
@@ -547,10 +525,7 @@ def _holding_events(
                 previous_state="not held",
                 current_state=f"{_pct(weights.get(symbol))} of equity",
                 materiality=Materiality.SIGNIFICANT,
-                summary=(
-                    f"{account} now holds {symbol} at {_pct(weights.get(symbol))} "
-                    f"of equity."
-                ),
+                summary=(f"{account} now holds {symbol} at {_pct(weights.get(symbol))} of equity."),
                 evidence=(Evidence("weight", 0.0, weights.get(symbol)),),
                 confidence=EventConfidence.HIGH,
                 provenance=source,
@@ -591,13 +566,10 @@ def _holding_events(
                 previous_state=_pct(was),
                 current_state=_pct(is_now),
                 materiality=(
-                    Materiality.NOTABLE
-                    if abs(shift) >= rules.WEIGHT_SHIFT
-                    else Materiality.ROUTINE
+                    Materiality.NOTABLE if abs(shift) >= rules.WEIGHT_SHIFT else Materiality.ROUTINE
                 ),
                 summary=(
-                    f"{symbol} moved from {_pct(was)} to {_pct(is_now)} of "
-                    f"{account}'s equity."
+                    f"{symbol} moved from {_pct(was)} to {_pct(is_now)} of {account}'s equity."
                 ),
                 evidence=(
                     Evidence(
@@ -682,12 +654,9 @@ def _shape_events(
                 subject=sector,
                 previous_state=_pct(was),
                 current_state=_pct(is_now),
-                materiality=(
-                    Materiality.SIGNIFICANT if crossed else Materiality.NOTABLE
-                ),
+                materiality=(Materiality.SIGNIFICANT if crossed else Materiality.NOTABLE),
                 summary=(
-                    f"{account}'s {sector} exposure moved from {_pct(was)} to "
-                    f"{_pct(is_now)}."
+                    f"{account}'s {sector} exposure moved from {_pct(was)} to {_pct(is_now)}."
                 ),
                 evidence=(
                     Evidence(
@@ -814,21 +783,17 @@ def detect_health(
             subject="sec_fact_store",
             previous_state=str(was),
             current_state=str(is_now),
-            materiality=(
-                Materiality.NOTABLE if recovered else Materiality.CRITICAL
-            ),
+            materiality=(Materiality.NOTABLE if recovered else Materiality.CRITICAL),
             summary=(
                 f"The SEC fact store moved from {was} to {is_now}"
-                + (
-                    "."
-                    if recovered
-                    else "; company analysis is degraded until it is synced."
-                )
+                + ("." if recovered else "; company analysis is degraded until it is synced.")
             ),
             evidence=(
                 Evidence("status", was, is_now),
                 Evidence(
-                    "rows", previous.get("rows"), current.get("rows"),
+                    "rows",
+                    previous.get("rows"),
+                    current.get("rows"),
                     change=(current.get("rows") or 0) - (previous.get("rows") or 0),
                 ),
             ),

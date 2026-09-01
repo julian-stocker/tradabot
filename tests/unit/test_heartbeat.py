@@ -93,7 +93,8 @@ class TestEmitter:
                 return None
 
         result = emit(
-            "https://watchdog.example/ping", now=NOW,
+            "https://watchdog.example/ping",
+            now=NOW,
             opener=lambda _request, **_kwargs: _Response(),
         )
         assert result.sent
@@ -101,6 +102,7 @@ class TestEmitter:
 
     def test_no_ping_url_appears_in_the_result(self) -> None:
         """A ping URL is a bearer credential."""
+
         def explode(_request: object, **_kwargs: object) -> object:
             msg = "https://watchdog.example/secret-token failed"
             raise OSError(msg)

@@ -139,9 +139,7 @@ class MonitoringEngine:
         bars = inputs.bars.get(inputs.benchmark)
         if bars is None:
             return []
-        current = obs.market_observation(
-            bars, inputs.as_of, trend_band=rules.REGIME_TREND_BAND
-        )
+        current = obs.market_observation(bars, inputs.as_of, trend_band=rules.REGIME_TREND_BAND)
         held = self._store.get(MARKET_SCOPE, inputs.benchmark)
         previous = held.state if held else None
 
@@ -269,9 +267,7 @@ class MonitoringEngine:
                     sector_confidence=inputs.sector_confidence,
                 )
             )
-            self._store.put(
-                PORTFOLIO_SCOPE, account, observation, observed_at=inputs.as_of
-            )
+            self._store.put(PORTFOLIO_SCOPE, account, observation, observed_at=inputs.as_of)
         return events
 
     def _health(self, inputs: MonitoringInputs, now: datetime) -> list[ChangeEvent]:
@@ -282,9 +278,7 @@ class MonitoringEngine:
         events = detectors.detect_health(
             held.state if held else None, observation, now=now, as_of=inputs.as_of
         )
-        self._store.put(
-            HEALTH_SCOPE, "sec_fact_store", observation, observed_at=inputs.as_of
-        )
+        self._store.put(HEALTH_SCOPE, "sec_fact_store", observation, observed_at=inputs.as_of)
         return events
 
     # -------------------------------------------------------------- filter
@@ -349,9 +343,7 @@ def _valuation_hysteresis(
     else:
         pending, count = band, 1
     baseline = dict(previous)
-    baseline["valuation_context"] = (
-        confirmed if count >= rules.VALUATION_CONFIRM_PASSES else band
-    )
+    baseline["valuation_context"] = confirmed if count >= rules.VALUATION_CONFIRM_PASSES else band
     carried = {
         "confirmed_valuation": confirmed,
         "pending_valuation": pending,

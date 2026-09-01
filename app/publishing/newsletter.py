@@ -107,8 +107,10 @@ def executive_summary(
 
     counts = len(events)
     activity = (
-        "Quiet — nothing material" if counts == 0
-        else f"Light — {counts} material change(s)" if counts <= _LIGHT_WEEK
+        "Quiet — nothing material"
+        if counts == 0
+        else f"Light — {counts} material change(s)"
+        if counts <= _LIGHT_WEEK
         else f"Busy — {counts} material change(s)"
     )
 
@@ -136,8 +138,7 @@ def _this_week(digest: Digest, limit: int = 5) -> list[str]:
         key=lambda r: -MATERIALITY_ORDER.get(str(r.get("materiality")), 0),
     )
     return [
-        f"• **{r['subject']}** — {presentation.humanise(str(r['summary']))}"
-        for r in ranked[:limit]
+        f"• **{r['subject']}** — {presentation.humanise(str(r['summary']))}" for r in ranked[:limit]
     ]
 
 
@@ -185,8 +186,7 @@ def sections(
         short, long = regime.get("volatility_20d"), regime.get("volatility_252d")
         if isinstance(short, (int, float)) and isinstance(long, (int, float)):
             market.append(
-                f"Volatility {short * 100:.0f}% over 20 sessions vs {long * 100:.0f}% "
-                f"over a year"
+                f"Volatility {short * 100:.0f}% over 20 sessions vs {long * 100:.0f}% over a year"
             )
     fields["MARKET"] = "\n".join(market) if market else "No regime data."
 
@@ -249,6 +249,8 @@ def message(
         event_type=EventType.MARKET_TRENDS,
         occurred_at=occurred_at,
         key=f"weekly:{week_ending}",
-        fields={**sections(digest, regime=regime, coverage=coverage, events=events),
-                "Note": DISCLAIMER},
+        fields={
+            **sections(digest, regime=regime, coverage=coverage, events=events),
+            "Note": DISCLAIMER,
+        },
     )

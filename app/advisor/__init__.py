@@ -18,9 +18,10 @@ from app.advisor.schemas import (
     Section,
     ValuationContext,
 )
-from app.advisor.service import AdvisorService, PriceSeries
+from app.advisor.service import UNPRICED, AdvisorService, MarketIdentity, PriceSeries
 
 __all__ = [
+    "UNPRICED",
     "AdvisorReport",
     "AdvisorService",
     "Confidence",
@@ -28,6 +29,7 @@ __all__ = [
     "DenominatorBasis",
     "FactStore",
     "InvestmentAssessment",
+    "MarketIdentity",
     "Metric",
     "PriceSeries",
     "Provenance",

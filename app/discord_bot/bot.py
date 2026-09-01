@@ -54,9 +54,7 @@ MAX_CONCURRENT_CHECKS = 3
 themselves, and small enough that a burst cannot saturate the machine the
 scheduler shares."""
 
-BUSY_MESSAGE = (
-    "Tradabot is analysing several requests already. Please try again in a moment."
-)
+BUSY_MESSAGE = "Tradabot is analysing several requests already. Please try again in a moment."
 WRONG_CHANNEL_MESSAGE = "This command is available in #stocks."
 
 
@@ -148,16 +146,12 @@ class TradabotClient(discord.Client):
         async def check(interaction: discord.Interaction, symbol: str) -> None:
             await self._handle_check(interaction, symbol)
 
-    async def _handle_check(
-        self, interaction: discord.Interaction, symbol: str
-    ) -> None:
+    async def _handle_check(self, interaction: discord.Interaction, symbol: str) -> None:
         """One invocation, one visible answer. **Never raises into discord.py.**"""
         self.health.last_interaction = datetime.now(UTC)
         if interaction.channel_id != self._settings.stocks_channel_id:
             # Ephemeral, and it names the channel rather than its numeric ID.
-            await interaction.response.send_message(
-                WRONG_CHANNEL_MESSAGE, ephemeral=True
-            )
+            await interaction.response.send_message(WRONG_CHANNEL_MESSAGE, ephemeral=True)
             return
 
         if self._slots.locked():
@@ -180,9 +174,7 @@ class TradabotClient(discord.Client):
                 clock.log(symbol=symbol, cold=cold)
             except Exception as exc:
                 self.health.errors += 1
-                logger.warning(
-                    "check failed", symbol=symbol[:12], reason=type(exc).__name__
-                )
+                logger.warning("check failed", symbol=symbol[:12], reason=type(exc).__name__)
                 await self._say_failed(interaction)
 
     async def _analyse(self, symbol: str, clock: Timings) -> StockCheck:
@@ -217,9 +209,7 @@ class TradabotClient(discord.Client):
             logger.warning("could not deliver failure notice")
 
 
-async def run(
-    settings: BotSettings, *, analyst_factory: Callable[[], StockAnalyst]
-) -> None:
+async def run(settings: BotSettings, *, analyst_factory: Callable[[], StockAnalyst]) -> None:
     """Connect and serve until cancelled.
 
     ``discord.py`` owns reconnection, session resumption and rate limiting --

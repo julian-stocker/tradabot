@@ -873,8 +873,7 @@ def _ops_install(settings: Settings) -> int:
     )
     print(f"\nwrote {len(daemons)} long-running agent template(s):")
     for job in daemons:
-        print(f"  {job.label:<28} restart throttle {job.interval_seconds}s  "
-              f"{job.description}")
+        print(f"  {job.label:<28} restart throttle {job.interval_seconds}s  {job.description}")
     print("\nThe interactive bot is not started either. To activate it:")
     for command in install_commands(daemons, target_dir=LAUNCH_AGENTS_DIR):
         print(f"  {command}")
@@ -1918,12 +1917,9 @@ def _portfolio_fit(settings: Settings, args: argparse.Namespace) -> int:
 
     prices = _advisor_prices(
         settings,
-        [s for s, _q in holdings] + ([args.candidate.upper()] if args.candidate else [])
-        + ["SPY"],
+        [s for s, _q in holdings] + ([args.candidate.upper()] if args.candidate else []) + ["SPY"],
     )
-    as_of = args.as_of or max(
-        (max(v.closes) for v in prices.values() if v.closes), default=None
-    )
+    as_of = args.as_of or max((max(v.closes) for v in prices.values() if v.closes), default=None)
     if as_of is None:
         print("DATA NOT SYNCED: no local price history", file=sys.stderr)
         return 2
@@ -1943,9 +1939,7 @@ def _portfolio_fit(settings: Settings, args: argparse.Namespace) -> int:
         _advisor_sectors(),
         _advisor_context(Path(args.facts), prices),
     )
-    report = service.analyse(
-        portfolio, as_of=as_of, candidate=args.candidate, amount=args.amount
-    )
+    report = service.analyse(portfolio, as_of=as_of, candidate=args.candidate, amount=args.amount)
     print(fit_to_json(report) if args.json else render_fit(report))
     return 0
 
@@ -1977,7 +1971,12 @@ def _advisor_context(facts_path: Path, prices: dict[str, Any]) -> Any:
     except Exception:
         return None
     return AdvisorCompanyContext(
-        AdvisorService(facts, prices, sectors=_advisor_sectors())
+        AdvisorService(
+            facts,
+            prices,
+            sectors=_advisor_sectors(),
+            company_sectors=_company_sectors(),
+        )
     )
 
 
@@ -2051,8 +2050,10 @@ async def _publish_async(settings: Settings, args: argparse.Namespace) -> int:
 
     for item in publisher.rendered:
         if args.render:
-            print(f"--- {item['channel']}  {item['colour']}  "
-                  f"{item['characters']} chars  content={item['content']!r} ---")
+            print(
+                f"--- {item['channel']}  {item['colour']}  "
+                f"{item['characters']} chars  content={item['content']!r} ---"
+            )
             print(item["title"])
             if item["body"]:
                 print(item["body"])
@@ -2103,8 +2104,10 @@ async def _publish_smoke_test(publisher: Any, args: argparse.Namespace) -> Any:
                 else [f"**Account:** {name} unavailable ({snapshot.error})"]
             )
         message = render.smoke_test_message(
-            destination=purpose, purpose="verifying routing and delivery",
-            detail=detail, occurred_at=stamp,
+            destination=purpose,
+            purpose="verifying routing and delivery",
+            detail=detail,
+            occurred_at=stamp,
         )
         outcome = await publisher.publish_message(
             channel, message, identity=f"smoke:{name}:{stamp.isoformat(timespec='seconds')}"
@@ -2181,9 +2184,7 @@ def _monitor_run(settings: Settings, args: argparse.Namespace) -> Any:
     return run
 
 
-async def _publish_portfolios(
-    settings: Settings, args: argparse.Namespace, publisher: Any
-) -> Any:
+async def _publish_portfolios(settings: Settings, args: argparse.Namespace, publisher: Any) -> Any:
     """One message per readable account, each to its own channel."""
     from app.monitoring import (  # noqa: PLC0415
         EventJournal,
@@ -2316,17 +2317,19 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     from app.advisor import AdvisorService, FactStore  # noqa: PLC0415
     from app.discord_bot.analysis import StockAnalyst  # noqa: PLC0415
     from app.fundamentals import health  # noqa: PLC0415
+    from app.instruments.registry import load as load_registry  # noqa: PLC0415
 
     state = health(facts_path)
     prices = _advisor_prices(settings, None)
     sectors = _advisor_sectors()
     facts = FactStore.from_parquet(facts_path) if state.ok else FactStore([])
-    advisor = AdvisorService(facts, prices, sectors=sectors)
+    advisor = AdvisorService(facts, prices, sectors=sectors, company_sectors=_company_sectors())
     as_of = max((max(v.closes) for v in prices.values() if v.closes), default="")
 
     # No broker handle: /check answers a company question, so an Alpaca outage
     # cannot slow it down or degrade it.
     return StockAnalyst(
+        registry=load_registry(_database_file(settings)),
         advisor=advisor,
         universe=sorted(prices),
         fundamentals=frozenset(facts.symbols) if state.ok else frozenset(),
@@ -2388,8 +2391,11 @@ def _monitor(settings: Settings, args: argparse.Namespace) -> int:
         since = (datetime.now(UTC).date() - timedelta(days=args.days)).isoformat()
         events = journal.read(since=date.fromisoformat(since))
         digest = build_digest(
-            events, _monitor_state(Path(args.state)),
-            since=since, until=datetime.now(UTC).date().isoformat(), limit=args.limit,
+            events,
+            _monitor_state(Path(args.state)),
+            since=since,
+            until=datetime.now(UTC).date().isoformat(),
+            limit=args.limit,
         )
         print(digest_to_json(digest) if args.json else render_digest(digest))
         return 0
@@ -2421,9 +2427,7 @@ def _monitor(settings: Settings, args: argparse.Namespace) -> int:
     if not args.no_journal:
         journal.append(run.events)
     print(
-        run_to_json(run)
-        if args.json
-        else render_run(run, evidence=args.evidence, limit=args.limit)
+        run_to_json(run) if args.json else render_run(run, evidence=args.evidence, limit=args.limit)
     )
     return 0
 
@@ -2579,6 +2583,31 @@ def _fundamentals(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if result.written else 1
 
 
+def _company_sectors() -> dict[str, str]:
+    """Sector by company key, from the SEC's SIC classification of each filer.
+
+    Covers every company in the fact store, foreign issuers included, and is
+    consulted only where :func:`_advisor_sectors` is silent.
+    """
+    from app.advisor.facts import company_key  # noqa: PLC0415
+    from app.fundamentals.sectors import sector_for  # noqa: PLC0415
+
+    settings = get_settings()
+    url = settings.database_url
+    path = url.rsplit("/", maxsplit=1)[-1] if "/" in url else url
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT cik, sic FROM companies WHERE cik IS NOT NULL AND sic IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # A database that predates the SIC migration simply has no fallback.
+        return {}
+    finally:
+        connection.close()
+    return {company_key(int(cik)): sector_for(sic) for cik, sic in rows}
+
+
 def _advisor_sectors() -> dict[str, str]:
     """Sector labels from the watchlist. Proxy-derived, surfaced as such."""
     settings = get_settings()
@@ -2604,12 +2633,20 @@ def _advisor(settings: Settings, args: argparse.Namespace) -> int:
     store_path = Path(args.facts)
     if not store_path.exists():
         print(f"DATA NOT SYNCED: no fact store at {store_path}", file=sys.stderr)
-        print("The Advisor reads persisted SEC facts; it does not fetch on demand.",
-              file=sys.stderr)
+        print(
+            "The Advisor reads persisted SEC facts; it does not fetch on demand.", file=sys.stderr
+        )
         return 2
     facts = FactStore.from_parquet(store_path)
     prices = _advisor_prices(settings, [args.symbol.upper(), "SPY"])
-    service = AdvisorService(facts, prices)
+    # Same sector knowledge as /check. Without it this command described banks
+    # as manufacturers, which is the defect it exists to help diagnose.
+    service = AdvisorService(
+        facts,
+        prices,
+        sectors=_advisor_sectors(),
+        company_sectors=_company_sectors(),
+    )
     report = service.analyse(args.symbol, as_of=args.as_of)
     print(to_json(report) if args.json else render(report, provenance=args.provenance))
     return 0
@@ -2688,53 +2725,71 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
 
 def _add_monitor_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """The monitoring commands: one pass, or a period summary."""
-    monitor = sub.add_parser(
-        "monitor", help="What changed since the last run, or that nothing did"
-    )
+    monitor = sub.add_parser("monitor", help="What changed since the last run, or that nothing did")
     monitor_sub = monitor.add_subparsers(dest="monitor_command", required=True)
     for name, description in (
         ("run", "Detect material changes since the previous run"),
         ("digest", "Summarise a period from the event journal"),
     ):
         parser = monitor_sub.add_parser(name, help=description)
-        parser.add_argument("--state", default="data/monitor_state",
-                            help="Where the previous baseline is kept")
-        parser.add_argument("--journal", default="data/monitor_events",
-                            help="Append-only record of reported events")
+        parser.add_argument(
+            "--state", default="data/monitor_state", help="Where the previous baseline is kept"
+        )
+        parser.add_argument(
+            "--journal", default="data/monitor_events", help="Append-only record of reported events"
+        )
         parser.add_argument("--json", action="store_true", help="Emit structured JSON")
         if name == "run":
-            parser.add_argument("--as-of", dest="as_of", default=None,
-                                help="Observe as of a past session (YYYY-MM-DD)")
-            parser.add_argument("--facts", default="data/sec_facts.parquet",
-                                help="Fact store used for company context and health")
-            parser.add_argument("--companies", action="store_true",
-                                help="Include company fundamentals, valuation and "
-                                     "filings (runs the Advisor per watched symbol)")
-            parser.add_argument("--accounts", action="store_true",
-                                help="Include read-only paper account portfolios")
-            parser.add_argument("--evidence", action="store_true",
-                                help="Show the measurements and thresholds behind "
-                                     "each event")
-            parser.add_argument("--ignore-cooldowns", action="store_true",
-                                help="Report repeats that a cooldown would suppress")
-            parser.add_argument("--no-journal", action="store_true",
-                                help="Do not append reported events to the journal")
-            parser.add_argument("--limit", type=int, default=10,
-                                help="How many ranked events to display; the run "
-                                     "still records and journals all of them")
+            parser.add_argument(
+                "--as-of",
+                dest="as_of",
+                default=None,
+                help="Observe as of a past session (YYYY-MM-DD)",
+            )
+            parser.add_argument(
+                "--facts",
+                default="data/sec_facts.parquet",
+                help="Fact store used for company context and health",
+            )
+            parser.add_argument(
+                "--companies",
+                action="store_true",
+                help="Include company fundamentals, valuation and "
+                "filings (runs the Advisor per watched symbol)",
+            )
+            parser.add_argument(
+                "--accounts", action="store_true", help="Include read-only paper account portfolios"
+            )
+            parser.add_argument(
+                "--evidence",
+                action="store_true",
+                help="Show the measurements and thresholds behind each event",
+            )
+            parser.add_argument(
+                "--ignore-cooldowns",
+                action="store_true",
+                help="Report repeats that a cooldown would suppress",
+            )
+            parser.add_argument(
+                "--no-journal",
+                action="store_true",
+                help="Do not append reported events to the journal",
+            )
+            parser.add_argument(
+                "--limit",
+                type=int,
+                default=10,
+                help="How many ranked events to display; the run "
+                "still records and journals all of them",
+            )
         else:
-            parser.add_argument("--days", type=int, default=7,
-                                help="How far back to summarise")
-            parser.add_argument("--limit", type=int, default=5,
-                                help="Rows per section")
-
+            parser.add_argument("--days", type=int, default=7, help="How far back to summarise")
+            parser.add_argument("--limit", type=int, default=5, help="Rows per section")
 
 
 def _add_publish_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Discord delivery. Output-only, and dry by default until told otherwise."""
-    publish = sub.add_parser(
-        "publish", help="Deliver monitoring output to Discord (output-only)"
-    )
+    publish = sub.add_parser("publish", help="Deliver monitoring output to Discord (output-only)")
     publish_sub = publish.add_subparsers(dest="publish_command", required=True)
     for name, description in (
         ("events", "Publish material market and company changes to market-signals"),
@@ -2743,38 +2798,55 @@ def _add_publish_parser(sub: argparse._SubParsersAction) -> None:  # type: ignor
         ("smoke-test", "Send one labelled TRADABOT TEST message per destination"),
     ):
         parser = publish_sub.add_parser(name, help=description)
-        parser.add_argument("--dry-run", action="store_true",
-                            help="Render and route without sending anything")
-        parser.add_argument("--render", action="store_true",
-                            help="Print every message that would be sent")
+        parser.add_argument(
+            "--dry-run", action="store_true", help="Render and route without sending anything"
+        )
+        parser.add_argument(
+            "--render", action="store_true", help="Print every message that would be sent"
+        )
         parser.add_argument("--json", action="store_true", help="Emit structured JSON")
-        parser.add_argument("--state", default="data/monitor_state",
-                            help="Monitoring baseline directory")
-        parser.add_argument("--journal", default="data/monitor_events",
-                            help="Monitoring event journal directory")
-        parser.add_argument("--ledger", default="data/monitor_delivery",
-                            help="Delivery ledger directory (idempotency)")
-        parser.add_argument("--facts", default="data/sec_facts.parquet",
-                            help="Fact store for company context and coverage")
-        parser.add_argument("--as-of", dest="as_of", default=None,
-                            help="Observe as of a past session (YYYY-MM-DD)")
+        parser.add_argument(
+            "--state", default="data/monitor_state", help="Monitoring baseline directory"
+        )
+        parser.add_argument(
+            "--journal", default="data/monitor_events", help="Monitoring event journal directory"
+        )
+        parser.add_argument(
+            "--ledger",
+            default="data/monitor_delivery",
+            help="Delivery ledger directory (idempotency)",
+        )
+        parser.add_argument(
+            "--facts",
+            default="data/sec_facts.parquet",
+            help="Fact store for company context and coverage",
+        )
+        parser.add_argument(
+            "--as-of", dest="as_of", default=None, help="Observe as of a past session (YYYY-MM-DD)"
+        )
         if name == "events":
-            parser.add_argument("--companies", action="store_true",
-                                help="Include fundamentals, filings and valuation")
-            parser.add_argument("--accounts", action="store_true",
-                                help=argparse.SUPPRESS)
+            parser.add_argument(
+                "--companies",
+                action="store_true",
+                help="Include fundamentals, filings and valuation",
+            )
+            parser.add_argument("--accounts", action="store_true", help=argparse.SUPPRESS)
         if name == "portfolio":
-            parser.add_argument("--always", action="store_true",
-                                help="Send a report even when nothing changed")
-            parser.add_argument("--companies", action="store_true",
-                                help=argparse.SUPPRESS)
-            parser.add_argument("--accounts", action="store_true",
-                                help=argparse.SUPPRESS)
+            parser.add_argument(
+                "--always", action="store_true", help="Send a report even when nothing changed"
+            )
+            parser.add_argument("--companies", action="store_true", help=argparse.SUPPRESS)
+            parser.add_argument("--accounts", action="store_true", help=argparse.SUPPRESS)
         if name == "weekly":
-            parser.add_argument("--days", type=int, default=7,
-                                help="How far back the letter summarises")
-            parser.add_argument("--if-due", dest="if_due", action="store_true",
-                                help="Publish only if this week has not been sent")
+            parser.add_argument(
+                "--days", type=int, default=7, help="How far back the letter summarises"
+            )
+            parser.add_argument(
+                "--if-due",
+                dest="if_due",
+                action="store_true",
+                help="Publish only if this week has not been sent",
+            )
 
 
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -2783,36 +2855,49 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
         "advisor", help="Factual read-only company report (never a recommendation)"
     )
     advisor.add_argument("symbol", help="Ticker to analyse")
-    advisor.add_argument("--as-of", dest="as_of", default=None,
-                         help="Analyse as of a past date (YYYY-MM-DD), point-in-time")
+    advisor.add_argument(
+        "--as-of",
+        dest="as_of",
+        default=None,
+        help="Analyse as of a past date (YYYY-MM-DD), point-in-time",
+    )
     advisor.add_argument("--json", action="store_true", help="Emit structured JSON")
-    advisor.add_argument("--provenance", action="store_true",
-                         help="Show the SEC concept, filing and accession behind each figure")
-    advisor.add_argument("--facts", default="data/sec_facts.parquet",
-                         help="Path to the persisted point-in-time SEC fact store")
+    advisor.add_argument(
+        "--provenance",
+        action="store_true",
+        help="Show the SEC concept, filing and accession behind each figure",
+    )
+    advisor.add_argument(
+        "--facts",
+        default="data/sec_facts.parquet",
+        help="Path to the persisted point-in-time SEC fact store",
+    )
 
     fundamentals = sub.add_parser(
         "fundamentals", help="The persisted SEC fact store the Advisor reads"
     )
-    fundamentals_sub = fundamentals.add_subparsers(
-        dest="fundamentals_command", required=True
-    )
+    fundamentals_sub = fundamentals.add_subparsers(dest="fundamentals_command", required=True)
     for name, description in (
         ("status", "Report whether the fact store is synced, stale or corrupt"),
         ("sync", "Rebuild the fact store from SEC EDGAR (resumable, idempotent)"),
     ):
         parser = fundamentals_sub.add_parser(name, help=description)
-        parser.add_argument("--store", default="data/sec_facts.parquet",
-                            help="Path to the persisted fact store")
+        parser.add_argument(
+            "--store", default="data/sec_facts.parquet", help="Path to the persisted fact store"
+        )
         parser.add_argument("--json", action="store_true", help="Emit structured JSON")
         if name == "sync":
-            parser.add_argument("--symbols", default=None,
-                                help="Comma-separated tickers; defaults to every "
-                                     "instrument with daily history")
-            parser.add_argument("--cache", default="data/sec_cache",
-                                help="Durable per-symbol payload cache")
-            parser.add_argument("--force", action="store_true",
-                                help="Re-fetch every symbol, ignoring the cache")
+            parser.add_argument(
+                "--symbols",
+                default=None,
+                help="Comma-separated tickers; defaults to every instrument with daily history",
+            )
+            parser.add_argument(
+                "--cache", default="data/sec_cache", help="Durable per-symbol payload cache"
+            )
+            parser.add_argument(
+                "--force", action="store_true", help="Re-fetch every symbol, ignoring the cache"
+            )
 
     _add_monitor_parser(sub)
     _add_publish_parser(sub)
@@ -2825,26 +2910,38 @@ def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[t
     bot = sub.add_parser(
         "discord-bot", help="Run the interactive Discord bot (/check). Long-running."
     )
-    bot.add_argument("--facts", default="data/sec_facts.parquet",
-                     help="Fact store the Advisor reads")
-    bot.add_argument("--check-config", action="store_true",
-                     help="Report configuration presence and exit; sends nothing")
+    bot.add_argument(
+        "--facts", default="data/sec_facts.parquet", help="Fact store the Advisor reads"
+    )
+    bot.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Report configuration presence and exit; sends nothing",
+    )
 
     fit = sub.add_parser(
         "portfolio-fit", help="Describe how a candidate fits a portfolio (read-only)"
     )
-    fit.add_argument("portfolio",
-                     help="PAPER_1K, PAPER_3K or PAPER_10K to read a real paper "
-                          "account, or any other name for a portfolio given inline")
-    fit.add_argument("--facts", default="data/sec_facts.parquet",
-                     help="Fact store used for company context; omitted context "
-                          "leaves the portfolio analysis intact")
+    fit.add_argument(
+        "portfolio",
+        help="PAPER_1K, PAPER_3K or PAPER_10K to read a real paper "
+        "account, or any other name for a portfolio given inline",
+    )
+    fit.add_argument(
+        "--facts",
+        default="data/sec_facts.parquet",
+        help="Fact store used for company context; omitted context "
+        "leaves the portfolio analysis intact",
+    )
     fit.add_argument("--cash", type=float, default=0.0, help="Cash held")
-    fit.add_argument("--holding", action="append",
-                     help="Position as SYMBOL:QTY, repeatable")
+    fit.add_argument("--holding", action="append", help="Position as SYMBOL:QTY, repeatable")
     fit.add_argument("--candidate", default=None, help="Hypothetical candidate symbol")
-    fit.add_argument("--amount", type=float, default=None,
-                     help="Hypothetical cash amount to allocate to the candidate")
+    fit.add_argument(
+        "--amount",
+        type=float,
+        default=None,
+        help="Hypothetical cash amount to allocate to the candidate",
+    )
     fit.add_argument("--as-of", dest="as_of", default=None, help="Analyse as of a date")
     fit.add_argument("--json", action="store_true", help="Emit structured JSON")
 

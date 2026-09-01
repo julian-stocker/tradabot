@@ -58,14 +58,22 @@ would contradict the figure printed directly above the sentence. This is a
 threshold about what counts as a meaningful move."""
 
 _ABSENT_STATES: Final[frozenset[str]] = frozenset(
-    {"INSUFFICIENT_DATA", "INSUFFICIENT_HISTORY", "SPLIT_ADJUSTMENT_REQUIRED",
-     "SECTOR_SPECIFIC_MODEL_REQUIRED", "UNAVAILABLE"}
+    {
+        "INSUFFICIENT_DATA",
+        "INSUFFICIENT_HISTORY",
+        "SPLIT_ADJUSTMENT_REQUIRED",
+        "SECTOR_SPECIFIC_MODEL_REQUIRED",
+        "UNAVAILABLE",
+    }
 )
 """States that mean "we do not know". They belong in Data quality, where the
 limitation is stated once, not in a summary of what was found."""
 
 _CONFIDENCE_RANK: Final[dict[str, int]] = {
-    "INSUFFICIENT": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3,
+    "INSUFFICIENT": 0,
+    "LOW": 1,
+    "MEDIUM": 2,
+    "HIGH": 3,
 }
 
 _QUALITY_SECTIONS: Final[tuple[tuple[str, str, tuple[str, ...]], ...]] = (
@@ -94,8 +102,14 @@ _LABELS: Final[dict[str, str]] = {
 }
 
 _MONEY: Final[frozenset[str]] = frozenset(
-    {"revenue_ttm", "operating_income_ttm", "free_cash_flow", "cash", "total_debt",
-     "net_cash_or_debt"}
+    {
+        "revenue_ttm",
+        "operating_income_ttm",
+        "free_cash_flow",
+        "cash",
+        "total_debt",
+        "net_cash_or_debt",
+    }
 )
 _MULTIPLE: Final[frozenset[str]] = frozenset({"pe_ttm", "ps_ttm", "p_fcf"})
 _PER_SHARE: Final[frozenset[str]] = frozenset({"eps_ttm"})
@@ -109,15 +123,37 @@ those blocks monospaced, which is the only way to get real alignment; 18 keeps
 the longest label and its value on one line on a phone."""
 
 
-def _money(value: float) -> str:
+SYMBOLS: Final[dict[str, str]] = {
+    "USD": "$",
+    "EUR": "€",
+    "CAD": "CA$",
+    "GBP": "£",
+    "CHF": "CHF ",
+    "JPY": "¥",
+    "AUD": "A$",
+}
+"""Reporting-currency notation. A company that reports in euros must not have
+its revenue printed with a dollar sign: the number would be right and the
+sentence wrong, which is the harder error to notice. An unlisted code renders
+as the code itself rather than a guessed glyph."""
+
+
+def _symbol_for(currency: str | None) -> str:
+    if not currency:
+        return "$"
+    return SYMBOLS.get(currency.upper(), f"{currency.upper()} ")
+
+
+def _money(value: float, currency: str | None = None) -> str:
     # Sign outside the currency symbol: "-$42.76B" reads as a negative amount,
     # "$-42.76B" reads as a typo.
+    unit = _symbol_for(currency)
     sign = "-" if value < 0 else ""
     magnitude = abs(value)
     for scale, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
         if magnitude >= scale:
-            return f"{sign}${magnitude / scale:,.2f}{suffix}"
-    return f"{sign}${magnitude:,.0f}"
+            return f"{sign}{unit}{magnitude / scale:,.2f}{suffix}"
+    return f"{sign}{unit}{magnitude:,.0f}"
 
 
 def _count(value: float) -> str:
@@ -127,23 +163,23 @@ def _count(value: float) -> str:
     return f"{value:,.0f}"
 
 
-def _value(name: str, raw: float) -> str:
+def _value(name: str, raw: float, currency: str | None = None) -> str:
     if name in _MONEY:
-        return _money(raw)
+        return _money(raw, currency)
     if name in _MULTIPLE:
         return f"{raw:,.2f}\u00d7"
     if name in _PER_SHARE:
-        return f"${raw:,.2f}"
+        return f"{_symbol_for(currency)}{raw:,.2f}"
     if name in _COUNT:
         return _count(raw)
     return f"{raw * 100:.1f}%"
 
 
-def _metric(section: Any, name: str) -> str | None:
+def _metric(section: Any, name: str, currency: str | None = None) -> str | None:
     metric = (getattr(section, "metrics", {}) or {}).get(name)
     if metric is None or metric.value is None:
         return None
-    return _value(name, float(metric.value))
+    return _value(name, float(metric.value), currency)
 
 
 def _aligned(rows: Sequence[tuple[str, str]]) -> str:
@@ -157,6 +193,62 @@ def _aligned(rows: Sequence[tuple[str, str]]) -> str:
         return ""
     body = "\n".join(f"{label:<{_LABEL_WIDTH}}{value}" for label, value in rows)
     return f"```\n{body}\n```"
+
+
+IFRS_REFUSED_BY_SECTION: Final[dict[str, str]] = {
+    "BALANCE SHEET": (
+        "Leverage is not assessed for this issuer: IFRS borrowing concepts vary "
+        "by filer and routinely include lease liabilities, so a total-debt "
+        "figure would not be comparable."
+    ),
+    "CAPITAL STRUCTURE": (
+        "Share-count trend is not assessed for this issuer: IFRS reports shares "
+        "issued rather than shares outstanding, and the two differ by treasury "
+        "holdings."
+    ),
+    "CASH GENERATION": (
+        "Free cash flow is not assessed for this issuer: IFRS capital-expenditure "
+        "lines differ in what they include, so the figure would not be "
+        "comparable."
+    ),
+}
+"""Why an IFRS filer's section is thin.
+
+Phase 13.2 refused these metrics for stated semantic reasons, but the card said
+"Insufficient data" -- which reads as *Tradabot is missing something* when the
+truth is *this number would not mean what you think it means*. The distinction
+is the whole point of refusing, so it belongs on the card."""
+
+
+def _sector_note(section: Any) -> str | None:
+    """The explanation behind a sector refusal, not just its label.
+
+    "Not assessed for a financial company" is accurate and tells a reader
+    nothing. The vocabulary already carries the reason; the card simply was not
+    showing it.
+    """
+    labels = {str(v) for v in (getattr(section, "labels", {}) or {}).values()}
+    if _SECTOR_REFUSAL not in labels:
+        return None
+    state = presentation.state(_SECTOR_REFUSAL)
+    return f"{state.label}. {state.explanation}" if state.explanation else state.label
+
+
+def _ifrs_note(section_name: str, section: Any, taxonomy: str | None) -> str | None:
+    """The refusal wording for an IFRS filer, when that is the real reason."""
+    if taxonomy != "ifrs-full":
+        return None
+    note = IFRS_REFUSED_BY_SECTION.get(section_name)
+    if note is None:
+        return None
+    # Only when the section is actually thin. A sector refusal or a genuine data
+    # gap has its own wording and must not be overwritten by this one.
+    labels = {str(v) for v in (getattr(section, "labels", {}) or {}).values()}
+    if _SECTOR_REFUSAL in labels:
+        return None
+    if not any(state in labels for state in _THIN_STATES):
+        return None
+    return note
 
 
 def _state_lines(section: Any, *, overall: str) -> list[str]:
@@ -175,14 +267,12 @@ def _state_lines(section: Any, *, overall: str) -> list[str]:
         state = presentation.state(raw)
         lines.append(state.label)
     own = str(getattr(section, "confidence", "") or "")
-    if own and own != overall and _CONFIDENCE_RANK.get(own, 9) < _CONFIDENCE_RANK.get(
-        overall, 9
-    ):
+    if own and own != overall and _CONFIDENCE_RANK.get(own, 9) < _CONFIDENCE_RANK.get(overall, 9):
         lines.append(f"_Data here: {presentation.label(own).lower()}_")
     return lines
 
 
-def _net_position(section: Any) -> tuple[str, str] | None:
+def _net_position(section: Any, currency: str | None = None) -> tuple[str, str] | None:
     """Net cash or net debt, named by which it is and shown as a positive figure.
 
     ``net_cash_or_debt`` is one signed number, so the card previously read
@@ -195,10 +285,15 @@ def _net_position(section: Any) -> tuple[str, str] | None:
         return None
     value = float(metric.value)
     label = "Net cash" if value >= 0 else "Net debt"
-    return label, _money(abs(value))
+    return label, _money(abs(value), currency)
 
 
-def _quality_fields(report: Any, overall: str) -> dict[str, str]:
+def _quality_fields(
+    report: Any,
+    overall: str,
+    currency: str | None = None,
+    taxonomy: str | None = None,
+) -> dict[str, str]:
     """One field per company-quality section, figures first, state after."""
     fields: dict[str, str] = {}
     for name, label, metrics in _QUALITY_SECTIONS:
@@ -208,11 +303,15 @@ def _quality_fields(report: Any, overall: str) -> dict[str, str]:
         rows = [
             (_LABELS[key], rendered)
             for key in metrics
-            if (rendered := _metric(section, key))
+            if (rendered := _metric(section, key, currency))
         ]
-        if name == "BALANCE SHEET" and (net := _net_position(section)) is not None:
+        if name == "BALANCE SHEET" and (net := _net_position(section, currency)) is not None:
             rows.append(net)
         states = _state_lines(section, overall=overall)
+        note = _sector_note(section) or _ifrs_note(name, section, taxonomy)
+        if note is not None:
+            # Replace the generic state, do not stack a second sentence on it.
+            states = [f"_{note}_"]
         parts = [part for part in (_aligned(rows), *states) if part]
         if parts:
             fields[label] = "\n".join(parts)
@@ -232,9 +331,7 @@ def _valuation_field(report: Any) -> str:
         # is about price history and would be wrong here. Valuation has its own
         # reason for having none.
         parts = [_aligned(rows)] if rows else []
-        parts.append(
-            "Unavailable — not enough valuation history for a comparison."
-        )
+        parts.append("Unavailable — not enough valuation history for a comparison.")
         return "\n".join(parts)
     context = presentation.state(raw)
     if context.label:
@@ -330,9 +427,9 @@ def _summary_bullets(check: StockCheck) -> list[str]:
         bullets.append("Company fundamentals are unavailable for this instrument.")
         if check.market_data is Availability.AVAILABLE:
             bullets.append("Market data and market-position analysis are available.")
-        trend = _market_direction(report)
-        if trend:
-            bullets.append(trend)
+            trend = _market_direction(report)
+            if trend:
+                bullets.append(trend)
         return bullets[:_MAX_BULLETS]
 
     balance = (getattr(by_name.get("BALANCE SHEET"), "labels", {}) or {}).get("assessment")
@@ -344,27 +441,30 @@ def _summary_bullets(check: StockCheck) -> list[str]:
             else f"Balance sheet: {state.label.lower()}."
         )
 
-    dilution = (getattr(by_name.get("CAPITAL STRUCTURE"), "labels", {}) or {}).get(
-        "dilution"
-    )
+    dilution = (getattr(by_name.get("CAPITAL STRUCTURE"), "labels", {}) or {}).get("dilution")
     if dilution and dilution not in _ABSENT_STATES:
         state = presentation.state(dilution)
         bullets.append(
-            f"Share count is {state.short}."
-            if state.short != state.label
-            else f"{state.label}."
+            f"Share count is {state.short}." if state.short != state.label else f"{state.label}."
         )
 
     context = (report.valuation.labels or {}).get("ps_context")
+    # Only when this listing has its own prices. The Advisor computes the
+    # valuation band from whatever price series the ticker names, so for an
+    # unpriced foreign listing that band came from a different security -- the
+    # same leak the Valuation field already refuses.
+    if check.market_data is not Availability.AVAILABLE or getattr(check, "valuation_refusal", None):
+        context = None
     if context and context not in _ABSENT_STATES:
         bullets.append(
             f"Valuation is {presentation.state(context).short.lower()} relative to "
             f"its available history."
         )
 
-    trend = _market_direction(report)
-    if trend:
-        bullets.append(trend)
+    if check.market_data is Availability.AVAILABLE:
+        trend = _market_direction(report)
+        if trend:
+            bullets.append(trend)
     return bullets[:_MAX_BULLETS]
 
 
@@ -413,30 +513,113 @@ def _market_direction(report: Any) -> str | None:
     return "Currently trading " + " and ".join(parts) + "."
 
 
+_SECTOR_REFUSAL: Final = "SECTOR_SPECIFIC_MODEL_REQUIRED"
+_THIN_STATES: Final[frozenset[str]] = frozenset({"INSUFFICIENT_DATA", "INSUFFICIENT"})
+
+
+def _taxonomy(check: StockCheck) -> str | None:
+    """The accounting taxonomy of the company whose figures are shown."""
+    listing = getattr(check, "listing", None)
+    return getattr(listing, "taxonomy", None) if listing else None
+
+
+def _currency(check: StockCheck) -> str | None:
+    """The reporting currency of the company whose figures are shown."""
+    listing = getattr(check, "listing", None)
+    return getattr(listing, "reporting_currency", None) if listing else None
+
+
+def _by_design(check: StockCheck) -> bool:
+    """Whether thin coverage is a deliberate refusal rather than missing data.
+
+    True when every section Tradabot declined to assess carries a stated reason
+    -- a sector model it does not have, or an IFRS concept that is not
+    comparable -- and at least one section did report figures.
+
+    The distinction matters because "Insufficient data" under a card showing
+    reconciled euro revenue reads as *these numbers are not trustworthy*, which
+    is the opposite of what the state means.
+    """
+    report = getattr(check, "report", None)
+    if report is None:
+        return False
+    # A refused valuation is a stated refusal like any other, and it alone can
+    # drag the overall reading down: Canadian National files complete us-gaap
+    # figures in CAD and trades in USD, so every quality section is solid and
+    # the card still said "Insufficient data" because the one ratio Tradabot
+    # declines to mix currencies for is missing.
+    refused_valuation = bool(getattr(check, "valuation_refusal", None))
+    taxonomy = _taxonomy(check)
+    # The Advisor states a financial-sector refusal once, for the whole report;
+    # it explains every section it silences, not only the one it is attached to.
+    sector = any(
+        "financial-sector" in str(r) for r in (getattr(report, "risks", {}) or {}).get("data", ())
+    )
+    thin = solid = 0
+    for section in report.company_quality:
+        labels = {str(v) for v in (section.labels or {}).values()}
+        values = [m for m in (section.metrics or {}).values() if m.value is not None]
+        if str(section.confidence) not in _THIN_STATES:
+            solid += 1
+            continue
+        thin += 1
+        explained = (
+            sector
+            or _SECTOR_REFUSAL in labels
+            or (taxonomy == "ifrs-full" and section.name in IFRS_REFUSED_BY_SECTION)
+        )
+        if not explained and not values:
+            return False
+    if refused_valuation:
+        thin += 1
+    return thin > 0 and solid > 0
+
+
 def _data_quality_field(check: StockCheck) -> str:
     rows: list[tuple[str, str]] = []
+    explain: str | None = None
     if check.report is not None:
-        overall = str(
-            (check.report.confidence or {}).get("company_analysis", "INSUFFICIENT")
-        )
-        rows.append(("Confidence", presentation.label(overall).replace(" confidence", "")))
+        overall = str((check.report.confidence or {}).get("company_analysis", "INSUFFICIENT"))
+        if overall in _THIN_STATES and _by_design(check):
+            # Same analytical state, honest label. The figures on this card were
+            # reconciled to their filings; what is partial is the coverage.
+            rows.append(("Coverage", "Partial"))
+            explain = (
+                "Partial coverage, not unreliable figures: what is shown is "
+                "taken from the company's own filings. The sections above say "
+                "why they were not assessed."
+            )
+        else:
+            rows.append(("Confidence", presentation.label(overall).replace(" confidence", "")))
     rows.append(("As of", _pretty_date(check.as_of)))
     parts = [_aligned(rows)]
+    if explain is not None:
+        parts.append(f"_{explain}_")
     if check.fundamentals is Availability.UNAVAILABLE:
+        # A fund has no fundamentals to be missing. Saying "an absence of data"
+        # about an index tracker invites the reader to wait for a sync that
+        # will never produce revenue for it.
         parts.append(
-            "_Fundamentals unavailable — an absence of data, not a judgement about "
-            "the company._"
+            "_This is a fund, not an operating company: it has holdings and a "
+            "net asset value rather than revenue, margins and a balance sheet._"
+            if _is_fund(check)
+            else "_Fundamentals unavailable — an absence of data, not a judgement "
+            "about the company._"
         )
     parts.extend(f"_{note}_" for note in check.notes)
     return "\n".join(parts)
 
 
+def _is_fund(check: StockCheck) -> bool:
+    """Whether the resolved listing is a pooled vehicle rather than a company."""
+    listing = getattr(check, "listing", None)
+    return str(getattr(listing, "asset_type", "STOCK")) in {"ETF", "FUND", "ETN"}
+
+
 def _pretty_date(value: str) -> str:
     """``2026-08-14`` as ``14 Aug 2026``. Dates are read, not parsed."""
     try:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC).strftime(
-            "%d %b %Y"
-        )
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC).strftime("%d %b %Y")
     except ValueError:
         return value or "unknown"
 
@@ -448,16 +631,44 @@ def check_message(check: StockCheck) -> NotificationMessage:
     different owner, and mixing the two meant a reader had to separate them by
     eye on every card.
     """
-    if check.resolution in (Resolution.UNKNOWN_SYMBOL, Resolution.MALFORMED_SYMBOL):
+    if check.resolution is Resolution.AMBIGUOUS_SYMBOL:
+        return _ambiguous_message(check)
+    if check.resolution in (
+        Resolution.UNKNOWN_SYMBOL,
+        Resolution.MALFORMED_SYMBOL,
+        Resolution.UNSUPPORTED_LISTING,
+    ):
         return _unknown_message(check)
 
     fields: dict[str, str] = {}
     report = check.report
     if report is not None:
         overall = str((report.confidence or {}).get("company_analysis", "INSUFFICIENT"))
-        fields.update(_quality_fields(report, overall))
-        fields["Valuation"] = _valuation_field(report)
-        fields["Market position"] = _market_field(report)
+        fields.update(_quality_fields(report, overall, _currency(check), _taxonomy(check)))
+        refusal = getattr(check, "valuation_refusal", None)
+        if check.market_data is Availability.AVAILABLE and not refusal:
+            fields["Valuation"] = _valuation_field(report)
+            fields["Market position"] = _market_field(report)
+        elif check.market_data is Availability.AVAILABLE:
+            # Priced, but not in the currency the company reports in. The ratio
+            # is arithmetically computable and semantically meaningless.
+            fields["Valuation"] = f"Unavailable — {refusal}."
+            fields["Market position"] = _market_field(report)
+        else:
+            # Withheld, not borrowed. The Advisor is fed by ticker, so a Xetra
+            # listing would otherwise show its US ADR's price history,
+            # benchmarked against SPY -- a plausible-looking number measuring a
+            # different security in a different currency against a benchmark
+            # validated only for US listings.
+            fields["Valuation"] = (
+                "Unavailable — Tradabot holds no market data for this listing, "
+                "and will not price it from another venue."
+            )
+            fields["Market position"] = (
+                "Unavailable — no market data for this listing. Relative "
+                "strength is unavailable outside the US in any case: SPY was "
+                "validated against US listings and means nothing here."
+            )
     else:
         fields["Fundamentals"] = "Unavailable."
         fields["Valuation"] = "Unavailable."
@@ -486,10 +697,79 @@ def check_message(check: StockCheck) -> NotificationMessage:
     )
 
 
-def _unknown_message(check: StockCheck) -> NotificationMessage:
-    """A refusal that names what was asked for and never acts on a guess."""
-    lines = [check.detail or f'No supported instrument matches "{check.symbol}".']
+def _ambiguous_message(check: StockCheck) -> NotificationMessage:
+    """Several companies answer to this ticker, so name them and stop.
+
+    No selection, no ranking, no "did you mean". Picking would be exactly the
+    behaviour that produced a confident report about DTE Energy when Deutsche
+    Telekom was meant.
+    """
+    lines = [check.detail or f'"{check.symbol}" names more than one listing.']
     fields: dict[str, str] = {}
+    for candidate in check.candidates:
+        row = candidate if isinstance(candidate, dict) else candidate.as_dict()
+        data = []
+        if row.get("has_prices"):
+            data.append("market data")
+        if row.get("has_fundamentals"):
+            data.append("fundamentals")
+        # Keyed by the qualified listing, never by the company name. Embed
+        # fields are a mapping, so two listings of one issuer -- which carry
+        # the same name by definition -- collapsed into one entry: `/check SAP`
+        # said "2 listings, name the venue" and then offered only SAP.US, with
+        # SAP.DE nowhere on the card that existed to point at it. `(mic,
+        # symbol)` is unique by database constraint, so this cannot recur.
+        fields[str(row["qualified"])[:250]] = (
+            f"{row['company']}\n"
+            f"`/check symbol:{row['qualified']}`\n"
+            f"{row['mic']} · {row['country']} · {row['quote_currency']}\n"
+            f"{'Available: ' + ', '.join(data) if data else 'No data available yet'}"
+        )
+    fields["Why"] = (
+        "Tradabot will not choose between companies. Analysing the wrong one "
+        "would look exactly like analysing the right one."
+    )
+    return NotificationMessage(
+        category=EventCategory.MARKET,
+        severity=Severity.INFO,
+        colour=presentation.COLOURS[presentation.Semantic.UNCERTAIN],
+        title=f"\U0001f50e {check.symbol} — which listing?",
+        body="\n".join(lines),
+        event_type=EventType.MARKET_TRENDS,
+        occurred_at=check.checked_at,
+        key=f"check-ambiguous:{check.symbol}",
+        footer=FOOTER,
+        show_timestamp=False,
+        fields=fields,
+    )
+
+
+def _unknown_message(check: StockCheck) -> NotificationMessage:
+    """A refusal that names what was asked for and never acts on a guess.
+
+    Two different refusals share this shape and must not share its wording. A
+    symbol that matches nothing is unknown; a symbol that matches a listing
+    Tradabot holds no data for is *known and unsupported*. Saying "no supported
+    instrument matches MBG" directly above a field naming Mercedes-Benz Group
+    on Xetra contradicted itself, and left the reader unsure whether the symbol
+    or the data was the problem.
+    """
+    known = check.listing is not None
+    lines = [
+        check.detail
+        or (
+            f'"{check.symbol}" is a listing Tradabot knows and holds no data for yet.'
+            if known
+            else f'No supported instrument matches "{check.symbol}".'
+        )
+    ]
+    fields: dict[str, str] = {}
+    if check.listing is not None:
+        fields["Listing"] = (
+            f"{check.listing.company_name}\n{check.listing.mic} · "
+            f"{check.listing.country} · {check.listing.quote_currency}\n"
+            "Tradabot holds neither prices nor filings for this listing yet."
+        )
     if check.suggestion:
         fields["Possible match"] = (
             f"`{check.suggestion}`\n"
@@ -497,14 +777,22 @@ def _unknown_message(check: StockCheck) -> NotificationMessage:
             "Tradabot will not substitute it for you."
         )
     fields["Why"] = (
-        "Analysing a different instrument than the one asked about would produce "
-        "a confident report about the wrong company."
+        "The listing is recognised; Tradabot simply holds no prices or filings "
+        "for it. Reporting another listing's figures under this one would look "
+        "exactly like reporting this one."
+        if known
+        else "Analysing a different instrument than the one asked about would "
+        "produce a confident report about the wrong company."
     )
     return NotificationMessage(
         category=EventCategory.MARKET,
         severity=Severity.INFO,
         colour=presentation.COLOURS[presentation.Semantic.UNAVAILABLE],
-        title=f"🔎 {check.symbol} — symbol not found",
+        title=(
+            f"🔎 {check.symbol} — not available"
+            if known
+            else f"🔎 {check.symbol} — symbol not found"
+        ),
         body="\n".join(lines),
         event_type=EventType.MARKET_TRENDS,
         occurred_at=check.checked_at,

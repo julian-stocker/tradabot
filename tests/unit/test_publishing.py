@@ -39,8 +39,16 @@ NOW = datetime(2026, 8, 14, 21, 0, tzinfo=UTC)
 
 FORBIDDEN_IMPORTS = ("app.broker", "alpaca", "app.db", "sqlalchemy")
 RECOMMENDATION_WORDS = (
-    "BUY", "SELL", "STRONG BUY", "TARGET PRICE", "EXPECTED RETURN",
-    "PROBABILITY UP", "ROTATE", "REPLACE", "target_price", "expected_return",
+    "BUY",
+    "SELL",
+    "STRONG BUY",
+    "TARGET PRICE",
+    "EXPECTED RETURN",
+    "PROBABILITY UP",
+    "ROTATE",
+    "REPLACE",
+    "target_price",
+    "expected_return",
 )
 
 FAKE_ENV = {
@@ -66,11 +74,7 @@ def event(
     band: Materiality = Materiality.NOTABLE,
     as_of: str = "2026-08-14",
 ) -> ChangeEvent:
-    scope = (
-        Scope(ScopeKind.PORTFOLIO, account=account)
-        if account
-        else Scope(ScopeKind.COMPANY)
-    )
+    scope = Scope(ScopeKind.PORTFOLIO, account=account) if account else Scope(ScopeKind.COMPANY)
     return ChangeEvent(
         kind=kind,
         occurred_at=NOW,
@@ -94,11 +98,13 @@ def seeded(tmp_path: Path) -> DeliveryLedger:
     has already seen something.
     """
     ledger = DeliveryLedger(tmp_path)
-    for channel in (WebhookChannel.MARKET, WebhookChannel.PAPER_1K,
-                    WebhookChannel.PAPER_3K, WebhookChannel.PAPER_10K):
-        ledger.record(
-            "seed", channel.value, DeliveryStatus.DELIVERED, now=NOW - timedelta(days=30)
-        )
+    for channel in (
+        WebhookChannel.MARKET,
+        WebhookChannel.PAPER_1K,
+        WebhookChannel.PAPER_3K,
+        WebhookChannel.PAPER_10K,
+    ):
+        ledger.record("seed", channel.value, DeliveryStatus.DELIVERED, now=NOW - timedelta(days=30))
     ledger.flush()
     return ledger
 
@@ -133,9 +139,7 @@ class FakeNotifier:
             raise RuntimeError(msg)
         self.sent.append((channel.value, message.title))
         if self._fail:
-            return DeliveryResult(
-                backend="discord", delivered=False, error="HTTP 503", attempts=3
-            )
+            return DeliveryResult(backend="discord", delivered=False, error="HTTP 503", attempts=3)
         return DeliveryResult(backend="discord", delivered=True, attempts=1)
 
 
@@ -145,9 +149,7 @@ class TestNoRecommendationLeakage:
         for path, source in _sources():
             body = source.split('"""', 2)[-1]
             for word in RECOMMENDATION_WORDS:
-                assert not re.search(rf"\b{re.escape(word)}\b", body), (
-                    f"{path} emits {word}"
-                )
+                assert not re.search(rf"\b{re.escape(word)}\b", body), f"{path} emits {word}"
 
     def test_no_module_reaches_a_broker_or_the_database(self) -> None:
         """**The gate.** Discord is output-only; it holds nothing that could act."""
@@ -165,8 +167,7 @@ class TestNoRecommendationLeakage:
 
     def test_materiality_rules_are_not_reimplemented(self) -> None:
         """**The gate.** Monitoring owns the thresholds; a copy here would drift."""
-        banned = ("VOLUME_RATIO_NOTABLE =", "cooldown_hours(", "def band(",
-                  "REPORTABLE_FROM =")
+        banned = ("VOLUME_RATIO_NOTABLE =", "cooldown_hours(", "def band(", "REPORTABLE_FROM =")
         for path, source in _sources():
             for token in banned:
                 assert token not in source, f"{path} reimplements {token}"
@@ -177,17 +178,27 @@ class TestNoRecommendationLeakage:
         from app.publishing import newsletter
 
         weekly = newsletter.message(
-            build_digest([], {}, since="a", until="b"), week_ending="2026-08-16",
+            build_digest([], {}, since="a", until="b"),
+            week_ending="2026-08-16",
             occurred_at=NOW,
         )
         assert any("Descriptive monitoring" in v for v in weekly.fields.values())
         portfolio_fields = render.portfolio_message(
             "PAPER_1K",
-            SimpleNamespace(equity=1.0, cash=1.0, cash_pct=1.0, invested_pct=0.0,
-                            concentration="INSUFFICIENT_DATA", largest_position=None,
-                            sector_weights={}, weights={}, top3_pct=0.0),
+            SimpleNamespace(
+                equity=1.0,
+                cash=1.0,
+                cash_pct=1.0,
+                invested_pct=0.0,
+                concentration="INSUFFICIENT_DATA",
+                largest_position=None,
+                sector_weights={},
+                weights={},
+                top3_pct=0.0,
+            ),
             SimpleNamespace(annualised_volatility=None, average_correlation=None),
-            holdings=(), occurred_at=NOW,
+            holdings=(),
+            occurred_at=NOW,
         ).fields
         assert "not a view of total holdings" in portfolio_fields["Coverage"]
 
@@ -209,9 +220,7 @@ class TestRouting:
             ("PAPER_3K", WebhookChannel.PAPER_3K),
             ("PAPER_10K", WebhookChannel.PAPER_10K),
         ):
-            routed = channel_for(
-                event(EventKind.PORTFOLIO_WEIGHT_CHANGE, account=account)
-            )
+            routed = channel_for(event(EventKind.PORTFOLIO_WEIGHT_CHANGE, account=account))
             assert routed is channel
             assert routed is not MARKET_SIGNALS
 
@@ -223,9 +232,7 @@ class TestRouting:
 
     def test_an_unconfigured_paper_slot_does_not_reroute(self) -> None:
         """**The gate.** Missing destination means no message, never another slot."""
-        registry = WebhookRegistry.load(
-            env={k: v for k, v in FAKE_ENV.items() if "10K" not in k}
-        )
+        registry = WebhookRegistry.load(env={k: v for k, v in FAKE_ENV.items() if "10K" not in k})
         assert registry.url(WebhookChannel.PAPER_10K) is None
         assert registry.url(WebhookChannel.PAPER_3K) is not None
         assert paper_channel("PAPER_10K") is WebhookChannel.PAPER_10K
@@ -244,9 +251,7 @@ class TestFailureIsolation:
         assert outcome.delivered == 0
 
     @pytest.mark.asyncio
-    async def test_a_failed_delivery_is_recorded_not_forgotten(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_a_failed_delivery_is_recorded_not_forgotten(self, tmp_path: Path) -> None:
         """Leaving it unseen would flood the channel when the outage ended."""
         publisher = Publisher(notifier=FakeNotifier(fail=True), ledger=seeded(tmp_path))
         await publisher.publish_events(run_of(event()), now=NOW)
@@ -255,9 +260,7 @@ class TestFailureIsolation:
         assert pending[0].status is DeliveryStatus.DELIVERY_FAILED
 
     @pytest.mark.asyncio
-    async def test_a_failure_does_not_stop_the_other_destinations(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_a_failure_does_not_stop_the_other_destinations(self, tmp_path: Path) -> None:
         notifier = FakeNotifier(fail=True)
         publisher = Publisher(notifier=notifier, ledger=seeded(tmp_path))
         outcome = await publisher.publish_events(
@@ -323,9 +326,7 @@ class TestBatching:
         publisher = Publisher(notifier=FakeNotifier(), ledger=ledger)
         events = [event(subject=f"S{i}") for i in range(20)]
         asyncio.run(publisher.publish_events(run_of(*events), now=NOW))
-        assert all(
-            ledger.already_delivered(event_id(e), MARKET_SIGNALS.value) for e in events
-        )
+        assert all(ledger.already_delivered(event_id(e), MARKET_SIGNALS.value) for e in events)
 
 
 class TestIdempotency:
@@ -365,13 +366,11 @@ class TestIdempotency:
         assert outcome.suppressed_already_delivered == 1
 
     @pytest.mark.asyncio
-    async def test_a_failed_delivery_may_be_retried_next_pass(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_a_failed_delivery_may_be_retried_next_pass(self, tmp_path: Path) -> None:
         """Failed is not delivered, so the next pass may legitimately try again."""
-        await Publisher(
-            notifier=FakeNotifier(fail=True), ledger=seeded(tmp_path)
-        ).publish_events(run_of(event()), now=NOW)
+        await Publisher(notifier=FakeNotifier(fail=True), ledger=seeded(tmp_path)).publish_events(
+            run_of(event()), now=NOW
+        )
         notifier = FakeNotifier()
         again = Publisher(notifier=notifier, ledger=DeliveryLedger(tmp_path))
         await again.publish_events(run_of(event()), now=NOW)
@@ -393,9 +392,7 @@ class TestRecovery:
         assert (await publisher.reconcile(now=NOW)).quiet
 
     @pytest.mark.asyncio
-    async def test_a_large_backlog_becomes_one_bounded_notice(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_a_large_backlog_becomes_one_bounded_notice(self, tmp_path: Path) -> None:
         """**The gate.** Recovery must not discharge a day of alerts."""
         ledger = DeliveryLedger(tmp_path)
         for i in range(40):
@@ -410,9 +407,7 @@ class TestRecovery:
         assert ledger.pending_failures() == []
 
     @pytest.mark.asyncio
-    async def test_recovery_goes_to_system_not_an_alert_channel(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_recovery_goes_to_system_not_an_alert_channel(self, tmp_path: Path) -> None:
         ledger = DeliveryLedger(tmp_path)
         for i in range(20):
             ledger.record(f"e{i}", "MARKET", DeliveryStatus.DELIVERY_FAILED, now=NOW)
@@ -438,29 +433,45 @@ class TestMessageShape:
 
     def test_a_flat_portfolio_says_so_rather_than_inventing_analysis(self) -> None:
         exposure = SimpleNamespace(
-            equity=1000.0, cash=1000.0, cash_pct=1.0, invested_pct=0.0,
-            concentration="INSUFFICIENT_DATA", largest_position=None, sector_weights={},
+            equity=1000.0,
+            cash=1000.0,
+            cash_pct=1.0,
+            invested_pct=0.0,
+            concentration="INSUFFICIENT_DATA",
+            largest_position=None,
+            sector_weights={},
         )
         risk = SimpleNamespace(annualised_volatility=None)
-        text = visible(render.portfolio_message(
-            "PAPER_1K", exposure, risk, holdings=(), occurred_at=NOW
-        ))
+        text = visible(
+            render.portfolio_message("PAPER_1K", exposure, risk, holdings=(), occurred_at=NOW)
+        )
         assert "holds no positions" in text
         assert "Positions 0" in text
 
     def test_partial_coverage_is_labelled(self) -> None:
         """**The gate.** Never imply a partial account is the whole portfolio."""
         exposure = SimpleNamespace(
-            equity=1000.0, cash=500.0, cash_pct=0.5, invested_pct=0.5,
-            concentration="LOW_CONCENTRATION", largest_position=("AAA", 0.5),
-            sector_weights={"tech": 0.5}, weights={"AAA": 0.5}, top3_pct=0.5,
+            equity=1000.0,
+            cash=500.0,
+            cash_pct=0.5,
+            invested_pct=0.5,
+            concentration="LOW_CONCENTRATION",
+            largest_position=("AAA", 0.5),
+            sector_weights={"tech": 0.5},
+            weights={"AAA": 0.5},
+            top3_pct=0.5,
         )
         risk = SimpleNamespace(annualised_volatility=0.2, average_correlation=0.11)
-        text = visible(render.portfolio_message(
-            "PAPER_3K", exposure, risk,
-            holdings=({"symbol": "AAA"},), coverage="PARTIAL — US holdings only",
-            occurred_at=NOW,
-        ))
+        text = visible(
+            render.portfolio_message(
+                "PAPER_3K",
+                exposure,
+                risk,
+                holdings=({"symbol": "AAA"},),
+                coverage="PARTIAL — US holdings only",
+                occurred_at=NOW,
+            )
+        )
         assert "PARTIAL — US holdings only" in text
 
     def test_a_hypothetical_is_labelled_and_says_no_order_was_sent(self) -> None:
@@ -493,9 +504,7 @@ class TestFirstRun:
         assert outcome.baselined == 30
 
     @pytest.mark.asyncio
-    async def test_baselined_events_never_become_eligible_later(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_baselined_events_never_become_eligible_later(self, tmp_path: Path) -> None:
         notifier = FakeNotifier()
         await Publisher(notifier=notifier, ledger=DeliveryLedger(tmp_path)).publish_events(
             run_of(event()), now=NOW
@@ -506,9 +515,7 @@ class TestFirstRun:
         assert outcome.suppressed_already_delivered == 1
 
     @pytest.mark.asyncio
-    async def test_a_genuinely_new_event_sends_after_the_baseline(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_a_genuinely_new_event_sends_after_the_baseline(self, tmp_path: Path) -> None:
         notifier = FakeNotifier()
         await Publisher(notifier=notifier, ledger=DeliveryLedger(tmp_path)).publish_events(
             run_of(event(subject="MSFT")), now=NOW
@@ -559,27 +566,43 @@ class TestPortfolioCoverage:
     def test_every_portfolio_message_states_coverage(self) -> None:
         """**The gate.** There is no silent case."""
         exposure = SimpleNamespace(
-            equity=1000.0, cash=1000.0, cash_pct=1.0, invested_pct=0.0,
-            concentration="INSUFFICIENT_DATA", largest_position=None, sector_weights={},
+            equity=1000.0,
+            cash=1000.0,
+            cash_pct=1.0,
+            invested_pct=0.0,
+            concentration="INSUFFICIENT_DATA",
+            largest_position=None,
+            sector_weights={},
         )
         risk = SimpleNamespace(annualised_volatility=None)
-        text = visible(render.portfolio_message(
-            "PAPER_1K", exposure, risk, holdings=(), occurred_at=NOW
-        ))
+        text = visible(
+            render.portfolio_message("PAPER_1K", exposure, risk, holdings=(), occurred_at=NOW)
+        )
         assert "Coverage" in text
         assert "ALPACA ACCOUNT ONLY" in text
 
     def test_coverage_never_invents_a_position(self) -> None:
         """Labelling an account partial must not add holdings it cannot see."""
         exposure = SimpleNamespace(
-            equity=1000.0, cash=1000.0, cash_pct=1.0, invested_pct=0.0,
-            concentration="INSUFFICIENT_DATA", largest_position=None, sector_weights={},
+            equity=1000.0,
+            cash=1000.0,
+            cash_pct=1.0,
+            invested_pct=0.0,
+            concentration="INSUFFICIENT_DATA",
+            largest_position=None,
+            sector_weights={},
         )
         risk = SimpleNamespace(annualised_volatility=None)
-        text = visible(render.portfolio_message(
-            "PAPER_3K", exposure, risk, holdings=(),
-            coverage="PARTIAL — US-listed holdings only", occurred_at=NOW,
-        ))
+        text = visible(
+            render.portfolio_message(
+                "PAPER_3K",
+                exposure,
+                risk,
+                holdings=(),
+                coverage="PARTIAL — US-listed holdings only",
+                occurred_at=NOW,
+            )
+        )
         assert "PARTIAL — US-listed holdings only" in text
         assert "holds no positions" in text
 
@@ -594,8 +617,10 @@ class TestBaselineIsPerChannel:
         """**The gate.** The defect this fixes shipped two real alerts unbaselined."""
         ledger = DeliveryLedger(tmp_path)
         ledger.record(
-            "portfolio:PAPER_3K", WebhookChannel.PAPER_3K.value,
-            DeliveryStatus.DELIVERED, now=NOW,
+            "portfolio:PAPER_3K",
+            WebhookChannel.PAPER_3K.value,
+            DeliveryStatus.DELIVERED,
+            now=NOW,
         )
         ledger.flush()
         notifier = FakeNotifier()
@@ -655,8 +680,12 @@ class TestSemanticColours:
         """**The gate.** Rising volume is not good news; rising volatility is not bad."""
         from app.publishing.presentation import Semantic, semantic
 
-        for state in ("UNUSUAL_VOLUME", "UNUSUAL_VOLATILITY", "SECTOR_MOVE",
-                      "RELATIVE_STRENGTH_CHANGE"):
+        for state in (
+            "UNUSUAL_VOLUME",
+            "UNUSUAL_VOLATILITY",
+            "SECTOR_MOVE",
+            "RELATIVE_STRENGTH_CHANGE",
+        ):
             assert semantic(state) is Semantic.UNUSUAL
 
     def test_no_state_claims_a_forecast_or_a_recommendation(self) -> None:
@@ -679,10 +708,22 @@ class TestStateExplanations:
 
     @pytest.mark.parametrize(
         "state",
-        ["HIGH_OVERLAP", "IMPROVES_DIVERSIFICATION", "MATERIAL_DILUTION", "NET_CASH",
-         "UNUSUAL_VOLATILITY", "UNUSUAL_VOLUME", "LOW", "INSUFFICIENT_DATA",
-         "HIGH_CONCENTRATION", "VERY_HIGH_VS_HISTORY", "US_ONLY_VIEW",
-         "ALPACA_ACCOUNT_ONLY", "DATA_NOT_SYNCED", "TRENDING_UP"],
+        [
+            "HIGH_OVERLAP",
+            "IMPROVES_DIVERSIFICATION",
+            "MATERIAL_DILUTION",
+            "NET_CASH",
+            "UNUSUAL_VOLATILITY",
+            "UNUSUAL_VOLUME",
+            "LOW",
+            "INSUFFICIENT_DATA",
+            "HIGH_CONCENTRATION",
+            "VERY_HIGH_VS_HISTORY",
+            "US_ONLY_VIEW",
+            "ALPACA_ACCOUNT_ONLY",
+            "DATA_NOT_SYNCED",
+            "TRENDING_UP",
+        ],
     )
     def test_non_obvious_states_explain_themselves(self, state: str) -> None:
         """**The gate.** Every opaque label carries its meaning."""
@@ -708,15 +749,14 @@ class TestStateExplanations:
         from app.publishing.presentation import explain
 
         for state in ("UNUSUAL_VOLATILITY", "UNUSUAL_VOLUME"):
-            assert "not a direction" in (explain(state) or "").lower() or "forecast" in (
-                explain(state) or ""
-            ).lower()
+            assert (
+                "not a direction" in (explain(state) or "").lower()
+                or "forecast" in (explain(state) or "").lower()
+            )
 
     def test_trend_states_describe_rather_than_predict(self) -> None:
         assert "not a forecast" in (
-            __import__("app.publishing.presentation", fromlist=["explain"]).explain(
-                "TRENDING_UP"
-            )
+            __import__("app.publishing.presentation", fromlist=["explain"]).explain("TRENDING_UP")
             or ""
         )
 

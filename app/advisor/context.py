@@ -70,9 +70,7 @@ class AdvisorCompanyContext:
         try:
             report = self._service.analyse(symbol, as_of=as_of)
         except Exception as exc:
-            logger.warning(
-                "advisor context unavailable", symbol=symbol, reason=type(exc).__name__
-            )
+            logger.warning("advisor context unavailable", symbol=symbol, reason=type(exc).__name__)
             result = CompanyContext.missing(symbol, UNAVAILABLE)
         else:
             result = _pack(symbol, report)

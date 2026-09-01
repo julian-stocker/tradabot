@@ -22,9 +22,7 @@ _MATERIALITY_MARK = {
 }
 
 
-def render_run(
-    run: MonitoringRun, *, evidence: bool = False, limit: int | None = None
-) -> str:
+def render_run(run: MonitoringRun, *, evidence: bool = False, limit: int | None = None) -> str:
     """One monitoring pass as text.
 
     ``limit`` truncates the displayed list, never the run itself. Events are
@@ -74,12 +72,8 @@ def _render_event(index: int, event: ChangeEvent, *, evidence: bool) -> list[str
     ]
     if evidence:
         for item in event.evidence:
-            threshold = (
-                f", threshold {item.threshold}" if item.threshold is not None else ""
-            )
-            out.append(
-                f"      · {item.measure}: {item.previous} -> {item.current}{threshold}"
-            )
+            threshold = f", threshold {item.threshold}" if item.threshold is not None else ""
+            out.append(f"      · {item.measure}: {item.previous} -> {item.current}{threshold}")
         for source in event.provenance:
             out.append(f"      · source: {source.source} as of {source.as_of}")
     out.append("")
@@ -105,9 +99,7 @@ def render_digest(digest: Digest) -> str:
                 out.append(f"      {row['detail']}")
             else:
                 account = f" [{row['account']}]" if row.get("account") else ""
-                out.append(
-                    f"  [{row['materiality']}] {row['kind']} — {row['subject']}{account}"
-                )
+                out.append(f"  [{row['materiality']}] {row['kind']} — {row['subject']}{account}")
                 out.append(f"      {row['summary']}")
         if section.omitted:
             out.append(f"  … {section.omitted} more not shown")

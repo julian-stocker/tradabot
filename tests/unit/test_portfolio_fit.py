@@ -25,8 +25,16 @@ from app.portfolio_fit.schemas import FitConfidence, weakest
 PACKAGE = Path("app/portfolio_fit")
 FORBIDDEN_IMPORTS = ("app.broker", "app.paper.execution", "alpaca.trading")
 FORBIDDEN_TOKENS = ("submit_order", "MarketOrderRequest", "TradingClient", "cancel_order")
-ACTION_WORDS = ("BUY", "SELL", "ROTATE", "REPLACE", "REDUCE", "INCREASE",
-                "target_weight", "expected_return")
+ACTION_WORDS = (
+    "BUY",
+    "SELL",
+    "ROTATE",
+    "REPLACE",
+    "REDUCE",
+    "INCREASE",
+    "target_weight",
+    "expected_return",
+)
 
 
 def _sources() -> list[tuple[Path, str]]:
@@ -152,8 +160,8 @@ class TestOverlapDetection:
         twin_a, twin_b, opposite = {}, {}, {}
         for i, day in enumerate(days):
             move = 1.0 + (0.02 if i % 2 else -0.015)
-            twin_a[day] = 100.0 * move ** i
-            twin_b[day] = 50.0 * move ** i          # identical shape
+            twin_a[day] = 100.0 * move**i
+            twin_b[day] = 50.0 * move**i  # identical shape
             opposite[day] = 80.0 * (1.0 - (0.02 if i % 2 else -0.015)) ** i
         return {"TWIN_A": twin_a, "TWIN_B": twin_b, "OPP": opposite}
 
@@ -185,9 +193,7 @@ class TestConfidence:
 
     def test_missing_history_does_not_fabricate_risk(self) -> None:
         service = PortfolioFitService({}, {})
-        risk = service.risk(
-            Portfolio("P", 0.0, (Position("X", 1.0, 10.0),)), "2026-01-02"
-        )
+        risk = service.risk(Portfolio("P", 0.0, (Position("X", 1.0, 10.0),)), "2026-01-02")
         assert risk.annualised_volatility is None
         assert risk.insufficient_reason is not None
         assert risk.basis == "HISTORICAL ESTIMATE"
@@ -223,9 +229,17 @@ class TestCompanyContextIsBorrowed:
         """**The gate.** The Advisor owns fundamentals; a second copy would drift."""
         # Named specifically. Correlation percentiles are this layer's own work;
         # what must never appear here is a *fundamental* recomputed locally.
-        duplicated = ("ttm(", "revenue", "operating_margin", "gross_margin",
-                      "free_cash_flow", "shares_outstanding", "ps_percentile",
-                      "market_cap", "earnings_yield")
+        duplicated = (
+            "ttm(",
+            "revenue",
+            "operating_margin",
+            "gross_margin",
+            "free_cash_flow",
+            "shares_outstanding",
+            "ps_percentile",
+            "market_cap",
+            "earnings_yield",
+        )
         for path, source in _sources():
             body = source.split('"""', 2)[-1]
             for token in duplicated:
@@ -273,9 +287,7 @@ class TestCompanyContextIsBorrowed:
         assert report.holdings_detail[0]["context"]["unavailable_reason"] == UNAVAILABLE
 
     def test_without_a_provider_nothing_is_invented(self) -> None:
-        report = PortfolioFitService({}, {}).analyse(
-            self._portfolio(), as_of="2026-01-02"
-        )
+        report = PortfolioFitService({}, {}).analyse(self._portfolio(), as_of="2026-01-02")
         assert report.holdings_detail[0]["context"] is None
 
 
@@ -316,8 +328,7 @@ class TestClusters:
     @staticmethod
     def _prices(pattern: dict[str, list[float]]) -> dict[str, dict[str, float]]:
         return {
-            symbol: {f"2025-{1 + i // 28:02d}-{1 + i % 28:02d}": v
-                     for i, v in enumerate(series)}
+            symbol: {f"2025-{1 + i // 28:02d}-{1 + i % 28:02d}": v for i, v in enumerate(series)}
             for symbol, series in pattern.items()
         }
 
@@ -327,9 +338,9 @@ class TestClusters:
         prices = self._prices({"AAA": up, "BBB": up, "CCC": flat})
         service = PortfolioFitService(prices, {})
         portfolio = Portfolio(
-            "P", 0.0,
-            (Position("AAA", 1.0, 100.0), Position("BBB", 1.0, 100.0),
-             Position("CCC", 1.0, 100.0)),
+            "P",
+            0.0,
+            (Position("AAA", 1.0, 100.0), Position("BBB", 1.0, 100.0), Position("CCC", 1.0, 100.0)),
         )
         clusters = service.clusters(portfolio, "2025-12-31")
         assert len(clusters) == 1

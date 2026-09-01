@@ -208,9 +208,7 @@ def _monitor_health() -> dict[str, str]:
     def stamp(path: Path) -> str:
         if not path.exists():
             return "never"
-        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).strftime(
-            "%Y-%m-%d %H:%M UTC"
-        )
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     out: dict[str, str] = {}
     try:

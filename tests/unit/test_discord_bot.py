@@ -41,18 +41,41 @@ UNIVERSE = ["AAPL", "AMZN", "MSFT", "NVDA", "SPY", "TSLA"]
 FUNDAMENTALS = frozenset({"AAPL", "AMZN", "MSFT", "NVDA", "TSLA"})
 
 EXECUTION_TOKENS = (
-    "submit_order", "cancel_order", "cancel_orders", "replace_order",
-    "close_position", "close_all_positions", "liquidate", "submit_exit",
-    "TradingClient", "PaperOrderSubmitter", "MarketOrderRequest",
+    "submit_order",
+    "cancel_order",
+    "cancel_orders",
+    "replace_order",
+    "close_position",
+    "close_all_positions",
+    "liquidate",
+    "submit_exit",
+    "TradingClient",
+    "PaperOrderSubmitter",
+    "MarketOrderRequest",
 )
 RECOMMENDATION_WORDS = (
-    "BUY", "SELL", "HOLD", "STRONG BUY", "TARGET PRICE", "EXPECTED RETURN",
-    "PROBABILITY UP", "TOTAL_SCORE", "price_target", "expected_return",
+    "BUY",
+    "SELL",
+    "HOLD",
+    "STRONG BUY",
+    "TARGET PRICE",
+    "EXPECTED RETURN",
+    "PROBABILITY UP",
+    "TOTAL_SCORE",
+    "price_target",
+    "expected_return",
 )
 RECOMPUTED = (
-    "revenue_ttm =", "def ttm", "operating_margin =", "gross_margin =",
-    "free_cash_flow =", "percentile", "pstdev", "def _correlation",
-    "annualis", "herfindahl",
+    "revenue_ttm =",
+    "def ttm",
+    "operating_margin =",
+    "gross_margin =",
+    "free_cash_flow =",
+    "percentile",
+    "pstdev",
+    "def _correlation",
+    "annualis",
+    "herfindahl",
 )
 
 FAKE_ENV = {
@@ -87,17 +110,24 @@ def _report(
 
     quality = [
         SimpleNamespace(
-            name="GROWTH", metrics={"revenue_ttm": metric(4.6e11)},
-            labels={}, confidence="HIGH",
+            name="GROWTH",
+            metrics={"revenue_ttm": metric(4.6e11)},
+            labels={},
+            confidence="HIGH",
         ),
         SimpleNamespace(
             name="BALANCE SHEET",
-            metrics={"cash": metric(3.95e10), "total_debt": metric(8.23e10),
-                     "net_cash_or_debt": metric(net)},
-            labels={"assessment": assessment}, confidence="HIGH",
+            metrics={
+                "cash": metric(3.95e10),
+                "total_debt": metric(8.23e10),
+                "net_cash_or_debt": metric(net),
+            },
+            labels={"assessment": assessment},
+            confidence="HIGH",
         ),
         SimpleNamespace(
-            name="CAPITAL STRUCTURE", metrics={"shares_outstanding": metric(1.459e10)},
+            name="CAPITAL STRUCTURE",
+            metrics={"shares_outstanding": metric(1.459e10)},
             labels=labels or {"dilution": "BUYBACK_REDUCING_SHARE_COUNT"},
             confidence="HIGH",
         ),
@@ -108,9 +138,7 @@ def _report(
             metrics={"pe_ttm": metric(35.1), "ps_ttm": metric(9.6)},
             labels={"ps_context": ps_context},
         ),
-        market_position=SimpleNamespace(
-            metrics={"relative_strength_252d": metric(0.31)}
-        ),
+        market_position=SimpleNamespace(metrics={"relative_strength_252d": metric(0.31)}),
         confidence={"company_analysis": confidence},
         summary="AAPL: trailing revenue is 466.82B; the balance sheet reads NET_CASH.",
     )
@@ -120,9 +148,24 @@ class FakeAdvisor:
     def __init__(self, report: object | None = None, raises: bool = False) -> None:
         self._report, self._raises = report, raises
         self.calls: list[str] = []
+        self.company_keys: list[str | None] = []
+        self.markets: list[object] = []
 
-    def analyse(self, symbol: str, as_of: str | None = None) -> object:
+    def analyse(
+        self,
+        symbol: str,
+        as_of: str | None = None,
+        company_key: str | None = None,
+        market: object = None,
+    ) -> object:
+        # Three identities, deliberately separate. `company_key` names the
+        # reporting entity, which the Advisor gained when facts moved from
+        # ticker to company identity; `market` names the price series and
+        # benchmark, which it gained when a Xetra listing turned out to be
+        # reading its US ADR's history.
         self.calls.append(symbol)
+        self.company_keys.append(company_key)
+        self.markets.append(market)
         if self._raises:
             msg = "advisor exploded"
             raise RuntimeError(msg)
@@ -159,17 +202,16 @@ class TestReadOnlySafety:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     names = [node.module]
                 for name in names:
-                    assert not name.startswith(("app.broker", "alpaca", "app.db",
-                                                "sqlalchemy")), f"{path} imports {name}"
+                    assert not name.startswith(("app.broker", "alpaca", "app.db", "sqlalchemy")), (
+                        f"{path} imports {name}"
+                    )
 
     def test_no_recommendation_vocabulary(self) -> None:
         """**The gate.** Describing is allowed; prescribing is not."""
         for path, source in _sources():
             body = source.split('"""', 2)[-1]
             for word in RECOMMENDATION_WORDS:
-                assert not re.search(rf"\b{re.escape(word)}\b", body), (
-                    f"{path} emits {word}"
-                )
+                assert not re.search(rf"\b{re.escape(word)}\b", body), f"{path} emits {word}"
 
     def test_the_package_computes_no_financial_figure(self) -> None:
         """**The gate.** A second implementation would drift within a quarter."""
@@ -196,9 +238,7 @@ class TestConfiguration:
         settings = load(env=FAKE_ENV, dotenv=None)
         assert FAKE_ENV["DISCORD_BOT_TOKEN"] not in repr(settings)
         assert settings.describe()["bot_token_type"] == "SecretStr"
-        assert not any(
-            v in str(settings.describe()) for v in FAKE_ENV.values()
-        )
+        assert not any(v in str(settings.describe()) for v in FAKE_ENV.values())
 
     def test_missing_configuration_names_the_variable_not_the_value(self) -> None:
         with pytest.raises(BotConfigurationError) as excinfo:
@@ -239,9 +279,7 @@ class TestSymbolResolution:
 
     def test_a_suggestion_is_offered_but_never_executed(self) -> None:
         found = resolve("NVD", universe=UNIVERSE, fundamentals=FUNDAMENTALS)
-        message = check_message(
-            analyst().check("NVD", now=NOW)
-        )
+        message = check_message(analyst().check("NVD", now=NOW))
         assert found.suggestion == "NVDA"
         assert "not found" in message.title
         assert "will not substitute" in _visible(message)
@@ -271,9 +309,7 @@ class TestSymbolResolution:
         assert "not a judgement" in (found.detail or "")
 
     def test_an_unsynced_fact_store_is_its_own_state(self) -> None:
-        found = resolve(
-            "AAPL", universe=UNIVERSE, fundamentals=None, fact_store_ready=False
-        )
+        found = resolve("AAPL", universe=UNIVERSE, fundamentals=None, fact_store_ready=False)
         assert found.resolution is Resolution.DATA_NOT_SYNCED
 
     def test_the_outcomes_are_not_collapsed(self) -> None:
@@ -282,8 +318,9 @@ class TestSymbolResolution:
             resolve("!!!", universe=UNIVERSE, fundamentals=FUNDAMENTALS).resolution,
             resolve("SPY", universe=UNIVERSE, fundamentals=FUNDAMENTALS).resolution,
             resolve("AAPL", universe=UNIVERSE, fundamentals=FUNDAMENTALS).resolution,
-            resolve("AAPL", universe=UNIVERSE, fundamentals=None,
-                    fact_store_ready=False).resolution,
+            resolve(
+                "AAPL", universe=UNIVERSE, fundamentals=None, fact_store_ready=False
+            ).resolution,
         }
         assert len(outcomes) == 5
 
@@ -344,9 +381,7 @@ class TestPresentation:
 
     def test_labels_are_human_readable_not_enum_names(self) -> None:
         """**The gate.** No internal enum name should reach a reader."""
-        advisor = FakeAdvisor(
-            _report(labels={"dilution": "BUYBACK_REDUCING_SHARE_COUNT"})
-        )
+        advisor = FakeAdvisor(_report(labels={"dilution": "BUYBACK_REDUCING_SHARE_COUNT"}))
         text = _visible(check_message(analyst(advisor=advisor).check("AAPL", now=NOW)))
         assert "BUYBACK_REDUCING_SHARE_COUNT" not in text
         assert "Share count decreasing" in text
@@ -363,8 +398,7 @@ class TestPresentation:
         """The exception matters: a less trustworthy block must say so locally."""
         report = _report()
         report.company_quality[1].confidence = "LOW"
-        text = _visible(check_message(analyst(advisor=FakeAdvisor(report)).check(
-            "AAPL", now=NOW)))
+        text = _visible(check_message(analyst(advisor=FakeAdvisor(report)).check("AAPL", now=NOW)))
         assert "Data here: low confidence" in text
 
     def test_there_is_no_prose_summary_above_the_sections(self) -> None:
@@ -384,8 +418,16 @@ class TestPresentation:
         message = check_message(analyst().check("AAPL", now=NOW))
         bullets = message.fields["Summary"].splitlines()
         assert 1 <= len(bullets) <= _MAX_BULLETS
-        for banned in ("buy", "sell", "hold", "should", "attractive", "undervalued",
-                       "overvalued", "expected"):
+        for banned in (
+            "buy",
+            "sell",
+            "hold",
+            "should",
+            "attractive",
+            "undervalued",
+            "overvalued",
+            "expected",
+        ):
             assert banned not in message.fields["Summary"].lower()
 
     def test_figures_are_formatted_for_a_reader(self) -> None:
@@ -400,9 +442,7 @@ class TestPresentation:
     def test_a_sound_company_does_not_produce_a_green_card(self) -> None:
         """**The gate.** A green card reads as approval, which is a recommendation."""
         result = analyst().check("AAPL", now=NOW)
-        assert _dominant_colour(result) == presentation.COLOURS[
-            presentation.Semantic.NEUTRAL
-        ]
+        assert _dominant_colour(result) == presentation.COLOURS[presentation.Semantic.NEUTRAL]
 
     def test_a_severe_present_risk_dominates(self) -> None:
         advisor = FakeAdvisor(_report(labels={"dilution": "MATERIAL_DILUTION"}))
@@ -411,23 +451,17 @@ class TestPresentation:
 
     def test_data_limitations_dominate(self) -> None:
         result = analyst().check("SPY", now=NOW)
-        assert _dominant_colour(result) == presentation.COLOURS[
-            presentation.Semantic.UNCERTAIN
-        ]
+        assert _dominant_colour(result) == presentation.COLOURS[presentation.Semantic.UNCERTAIN]
 
     def test_low_confidence_reads_as_uncertain(self) -> None:
         advisor = FakeAdvisor(_report(confidence="LOW"))
         result = analyst(advisor=advisor).check("AAPL", now=NOW)
-        assert _dominant_colour(result) == presentation.COLOURS[
-            presentation.Semantic.UNCERTAIN
-        ]
+        assert _dominant_colour(result) == presentation.COLOURS[presentation.Semantic.UNCERTAIN]
 
     def test_unusual_valuation_reads_as_unusual(self) -> None:
         advisor = FakeAdvisor(_report(ps_context="VERY_HIGH_VS_HISTORY"))
         result = analyst(advisor=advisor).check("AAPL", now=NOW)
-        assert _dominant_colour(result) == presentation.COLOURS[
-            presentation.Semantic.UNUSUAL
-        ]
+        assert _dominant_colour(result) == presentation.COLOURS[presentation.Semantic.UNUSUAL]
 
     def test_missing_fundamentals_are_labelled_as_absent_data(self) -> None:
         text = _visible(check_message(analyst().check("SPY", now=NOW)))
@@ -549,9 +583,7 @@ class TestInterpretiveSummary:
         from app.discord_bot.render import _MAX_BULLETS
 
         assert _MAX_BULLETS == 4
-        bullets = check_message(analyst().check("AAPL", now=NOW)).fields[
-            "Summary"
-        ].splitlines()
+        bullets = check_message(analyst().check("AAPL", now=NOW)).fields["Summary"].splitlines()
         assert 1 <= len(bullets) <= 4
 
     def test_the_summary_describes_states_that_already_exist(self) -> None:
@@ -560,11 +592,10 @@ class TestInterpretiveSummary:
         assert "decreasing" in summary
 
     def test_a_negative_condition_may_be_described_negatively(self) -> None:
-        advisor = FakeAdvisor(_report(labels={"dilution": "MATERIAL_DILUTION"},
-                                      assessment="LEVERAGED"))
-        summary = check_message(analyst(advisor=advisor).check("AAPL", now=NOW)).fields[
-            "Summary"
-        ]
+        advisor = FakeAdvisor(
+            _report(labels={"dilution": "MATERIAL_DILUTION"}, assessment="LEVERAGED")
+        )
+        summary = check_message(analyst(advisor=advisor).check("AAPL", now=NOW)).fields["Summary"]
         assert "substantial net debt" in summary
         assert "materially increasing" in summary
 
@@ -576,8 +607,17 @@ class TestInterpretiveSummary:
 
     def test_the_summary_carries_no_recommendation(self) -> None:
         summary = check_message(analyst().check("AAPL", now=NOW)).fields["Summary"]
-        for banned in ("buy", "sell", "hold", "should", "undervalued", "overvalued",
-                       "expected", "target", "likely"):
+        for banned in (
+            "buy",
+            "sell",
+            "hold",
+            "should",
+            "undervalued",
+            "overvalued",
+            "expected",
+            "target",
+            "likely",
+        ):
             assert banned not in summary.lower()
 
     def test_market_direction_reads_the_sign_not_a_threshold(self) -> None:
@@ -650,8 +690,12 @@ class TestFooterAndTimestamp:
         from app.notifications.models import NotificationMessage
 
         message = NotificationMessage(
-            category=EventCategory.MARKET, severity=Severity.INFO, title="t", body="b",
-            event_type=EventType.MARKET_TRENDS, occurred_at=NOW,
+            category=EventCategory.MARKET,
+            severity=Severity.INFO,
+            title="t",
+            body="b",
+            event_type=EventType.MARKET_TRENDS,
+            occurred_at=NOW,
         )
         assert build_embed(message)["timestamp"] == NOW.isoformat()
 
@@ -700,14 +744,12 @@ class TestNeutralDirection:
             (0.101, "ahead of the benchmark"),
             (-0.101, "behind the benchmark"),
             (0.0, "in line with the benchmark"),
-            (0.0004, "in line with the benchmark"),   # renders as +0.0%
+            (0.0004, "in line with the benchmark"),  # renders as +0.0%
             (-0.0004, "in line with the benchmark"),  # renders as -0.0%
-            (0.0006, "ahead of the benchmark"),       # renders as +0.1%
+            (0.0006, "ahead of the benchmark"),  # renders as +0.1%
         ],
     )
-    def test_the_sign_matches_what_is_displayed(
-        self, value: float, expected: str
-    ) -> None:
+    def test_the_sign_matches_what_is_displayed(self, value: float, expected: str) -> None:
         """**The gate.** +0.0% is neither ahead nor behind."""
         from app.discord_bot.render import _market_direction
 
@@ -742,8 +784,9 @@ class TestFiftyTwoWeekHigh:
         report.market_position.metrics["drawdown_from_252d_high"] = SimpleNamespace(
             value=0.0, available=True
         )
-        block = check_message(analyst(advisor=FakeAdvisor(report)).check(
-            "AAPL", now=NOW)).fields["Market position"]
+        block = check_message(analyst(advisor=FakeAdvisor(report)).check("AAPL", now=NOW)).fields[
+            "Market position"
+        ]
         assert "at the high" in block
         assert "+0.0%" not in block
 
@@ -752,8 +795,9 @@ class TestFiftyTwoWeekHigh:
         report.market_position.metrics["drawdown_from_252d_high"] = SimpleNamespace(
             value=-0.10, available=True
         )
-        block = check_message(analyst(advisor=FakeAdvisor(report)).check(
-            "AAPL", now=NOW)).fields["Market position"]
+        block = check_message(analyst(advisor=FakeAdvisor(report)).check("AAPL", now=NOW)).fields[
+            "Market position"
+        ]
         assert "Below 52w high" in block
         assert "10.0%" in block
         assert "-10.0%" not in block
@@ -797,9 +841,7 @@ class TestPartialDataSummary:
         """INSUFFICIENT_HISTORY is also a regime state; its sentence is about
         price history and would be wrong under a valuation heading."""
         advisor = FakeAdvisor(_report(ps_context="INSUFFICIENT_HISTORY"))
-        block = check_message(analyst(advisor=advisor).check("SPY", now=NOW)).fields[
-            "Valuation"
-        ]
+        block = check_message(analyst(advisor=advisor).check("SPY", now=NOW)).fields["Valuation"]
         assert "not enough valuation history" in block
         assert "describe a regime" not in block
 
@@ -814,9 +856,10 @@ class TestFullySupportedRenderingUnchanged:
         """**The gate.** 12.40b's AAPL card was signed off; do not regress it."""
         message = check_message(analyst().check("AAPL", now=NOW))
         text = _visible(message)
-        assert _dominant_colour(analyst().check("AAPL", now=NOW)) == presentation.COLOURS[
-            presentation.Semantic.NEUTRAL
-        ]
+        assert (
+            _dominant_colour(analyst().check("AAPL", now=NOW))
+            == presentation.COLOURS[presentation.Semantic.NEUTRAL]
+        )
         assert "Net debt" in message.fields["Balance sheet"]
         assert "Portfolio" not in text
         assert message.body == ""
@@ -826,8 +869,7 @@ class TestFullySupportedRenderingUnchanged:
 
     def test_advisor_values_are_passed_through_untouched(self) -> None:
         report = _report()
-        message = check_message(analyst(advisor=FakeAdvisor(report)).check(
-            "AAPL", now=NOW))
+        message = check_message(analyst(advisor=FakeAdvisor(report)).check("AAPL", now=NOW))
         assert "$460.00B" in message.fields["Growth"]
         assert report.valuation.metrics["pe_ttm"].value == 35.1
         assert "35.10\u00d7" in message.fields["Valuation"]

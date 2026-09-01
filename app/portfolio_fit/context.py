@@ -90,5 +90,4 @@ class CompanyContextProvider(Protocol):
     an analysis that does not depend on this answer.
     """
 
-    def context(self, symbol: str, as_of: str) -> CompanyContext:
-        ...
+    def context(self, symbol: str, as_of: str) -> CompanyContext: ...

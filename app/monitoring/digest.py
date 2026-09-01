@@ -159,8 +159,9 @@ def _section(
     )
 
 
-def biggest_market_changes(events: Sequence[Mapping[str, Any]], limit: int = DEFAULT_LIMIT
-                           ) -> DigestSection:
+def biggest_market_changes(
+    events: Sequence[Mapping[str, Any]], limit: int = DEFAULT_LIMIT
+) -> DigestSection:
     return _section(
         "Market",
         "What were the biggest market changes?",
@@ -175,8 +176,9 @@ def biggest_market_changes(events: Sequence[Mapping[str, Any]], limit: int = DEF
     )
 
 
-def biggest_sector_changes(events: Sequence[Mapping[str, Any]], limit: int = DEFAULT_LIMIT
-                           ) -> DigestSection:
+def biggest_sector_changes(
+    events: Sequence[Mapping[str, Any]], limit: int = DEFAULT_LIMIT
+) -> DigestSection:
     return _section(
         "Sectors",
         "Which sectors moved most?",
@@ -255,10 +257,7 @@ def unresolved_risks(
                     }
                 )
         correlation = portfolio.get("average_correlation")
-        if (
-            isinstance(correlation, (int, float))
-            and correlation >= rules.CORRELATION_BANDS["p90"]
-        ):
+        if isinstance(correlation, (int, float)) and correlation >= rules.CORRELATION_BANDS["p90"]:
             rows.append(
                 {
                     "risk": "HIGH_INTERNAL_CORRELATION",

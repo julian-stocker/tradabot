@@ -52,9 +52,7 @@ DIGEST_ROWS = 12
 """Rows shown in a burst digest. The rest are counted, never silently dropped."""
 
 DISCLAIMER = "This is factual monitoring, not an investment recommendation."
-PORTFOLIO_DISCLAIMER = (
-    "Portfolio analysis only. No order was placed, and no action is recommended."
-)
+PORTFOLIO_DISCLAIMER = "Portfolio analysis only. No order was placed, and no action is recommended."
 
 _ICON: dict[str, str] = {
     "MARKET_REGIME_CHANGE": "🌐",
@@ -129,9 +127,7 @@ def event_message(
     # differ -- "unusual volatility" and "very high vs its own history" mean
     # different things and both may be on the card.
     meaning = [
-        text
-        for text in (kind.explanation, presentation.explain(event.current_state))
-        if text
+        text for text in (kind.explanation, presentation.explain(event.current_state)) if text
     ]
     body = presentation.humanise(event.summary)
     if meaning:
@@ -150,9 +146,7 @@ def event_message(
     )
 
 
-def burst_message(
-    events: Sequence[ChangeEvent], *, rows: int = DIGEST_ROWS
-) -> NotificationMessage:
+def burst_message(events: Sequence[ChangeEvent], *, rows: int = DIGEST_ROWS) -> NotificationMessage:
     """Many changes as one ranked digest.
 
     Events arrive already ranked by the monitoring engine, so truncation always
@@ -182,9 +176,7 @@ def burst_message(
             key=lambda s: list(Severity).index(s),
             default=Severity.INFO,
         ),
-        colour=presentation.COLOURS[
-            presentation.worst(*(str(e.kind) for e in events))
-        ],
+        colour=presentation.COLOURS[presentation.worst(*(str(e.kind) for e in events))],
         title=f"⚡ {len(events)} material market changes",
         body="\n".join(lines),
         event_type=EventType.MARKET_TRENDS,
@@ -243,9 +235,7 @@ def portfolio_message(
                 + "\n_Sector labels are proxy-derived, not an official classification._"
             )
         if risk.annualised_volatility is not None:
-            fields["Historical volatility"] = (
-                f"{risk.annualised_volatility * 100:.1f}% annualised"
-            )
+            fields["Historical volatility"] = f"{risk.annualised_volatility * 100:.1f}% annualised"
         if risk.average_correlation is not None:
             fields["Average correlation"] = f"{risk.average_correlation:.2f}"
         if cluster and cluster.get("symbols"):
@@ -264,8 +254,7 @@ def portfolio_message(
         ]
         if blocks:
             fields["Company context"] = (
-                "\n\n".join(blocks)
-                + "\n_Company quality is separate from portfolio fit._"
+                "\n\n".join(blocks) + "\n_Company quality is separate from portfolio fit._"
             )
 
     if events:
@@ -283,8 +272,8 @@ def portfolio_message(
 
     if confidence:
         fit = presentation.state(confidence)
-        fields["Portfolio-fit confidence"] = (
-            f"{fit.label}" + (f" — {fit.explanation}" if fit.explanation else "")
+        fields["Portfolio-fit confidence"] = f"{fit.label}" + (
+            f" — {fit.explanation}" if fit.explanation else ""
         )
 
     fields["Coverage"] = coverage_text + (
@@ -402,8 +391,7 @@ def hypothetical_message(
             if str(row["measure"]).startswith("sector::") and row["delta"]:
                 sector = str(row["measure"]).removeprefix("sector::")
                 lines.append(
-                    f"**{sector} exposure:** {row['before'] * 100:.0f}% → "
-                    f"{row['after'] * 100:.0f}%"
+                    f"**{sector} exposure:** {row['before'] * 100:.0f}% → {row['after'] * 100:.0f}%"
                 )
     if fit.weighted_average_correlation is not None:
         lines.append(f"**Average correlation:** {fit.weighted_average_correlation:.2f}")

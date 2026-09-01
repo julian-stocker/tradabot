@@ -263,9 +263,7 @@ def latest_filings(
     # Sorting by filing date then accession makes the winner deterministic when
     # a company files several documents on one day.
     newest = (
-        frame.sort(["symbol", "filed", "accession"])
-        .group_by("symbol", maintain_order=True)
-        .last()
+        frame.sort(["symbol", "filed", "accession"]).group_by("symbol", maintain_order=True).last()
     )
     return {
         str(row["symbol"]): {k: row.get(k) for k in columns if k != "symbol"}

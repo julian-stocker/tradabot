@@ -91,8 +91,13 @@ def test_every_job_runs_at_the_documented_cadence() -> None:
 
 def test_the_presentation_jobs_cannot_mutate_a_broker() -> None:
     """**The gate.** Every job added for reporting is read-only by command."""
-    presentation = {"monitor-market", "monitor-companies", "monitor-portfolio",
-                    "weekly-newsletter", "heartbeat"}
+    presentation = {
+        "monitor-market",
+        "monitor-companies",
+        "monitor-portfolio",
+        "weekly-newsletter",
+        "heartbeat",
+    }
     for job in scheduled_jobs():
         if job.name in presentation:
             assert job.args[0] in ("publish", "heartbeat")
