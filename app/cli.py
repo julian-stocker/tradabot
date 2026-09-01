@@ -2336,11 +2336,23 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
         universe=PeerUniverse(registry.all_candidates()), advisor=advisor, facts=facts
     )
 
+    from app.research_intelligence.developments import (  # noqa: PLC0415
+        CurrentDevelopmentsService,
+    )
+    from app.research_intelligence.store import EventStore  # noqa: PLC0415
+
+    # `open_existing` rather than the constructor: the constructor creates what
+    # it opens, and a /check that quietly created an empty research store would
+    # report "no events" for every company instead of "there is no store".
+    # Reads only local SQLite -- /check makes no network request.
+    developments = CurrentDevelopmentsService(store=EventStore.open_existing(), facts=facts)
+
     # No broker handle: /check answers a company question, so an Alpaca outage
     # cannot slow it down or degrade it.
     return StockAnalyst(
         registry=registry,
         peers=peers,
+        developments=developments,
         advisor=advisor,
         universe=sorted(prices),
         fundamentals=frozenset(facts.symbols) if state.ok else frozenset(),

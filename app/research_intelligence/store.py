@@ -248,6 +248,7 @@ def _event(row: sqlite3.Row) -> ResearchEvent:
         extraction_confidence=Confidence(row["extraction_confidence"]),
         historical_evidence=HistoricalEvidence(row["historical_evidence"]),
         supersedes_event_id=row["supersedes_event_id"],
+        superseded_at=row["superseded_at"],
         amends_accession=row["amends_accession"],
     )
 
@@ -365,6 +366,20 @@ class EventStore:
         self._memory = sqlite3.connect(":memory:") if self._path == ":memory:" else None
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+
+    @classmethod
+    def open_existing(cls, path: str | Path = DEFAULT_PATH) -> EventStore | None:
+        """The store at ``path``, or ``None`` if there is no file there.
+
+        The constructor creates what it opens, which is right for ingestion and
+        wrong for a reader: a ``/check`` that quietly created an empty database
+        would then report "no events" for every company, which is a different
+        statement from "the research store has not been built". Consumers use
+        this and keep the two apart.
+        """
+        if str(path) != ":memory:" and not Path(path).exists():
+            return None
+        return cls(path)
 
     def _connect(self) -> Any:
         if self._memory is not None:
@@ -514,6 +529,20 @@ class EventStore:
     def get(self, event_id: str) -> ResearchEvent | None:
         found = self._query("event_id = ?", (event_id,))
         return found[0] if found else None
+
+    def has_company(self, company_id: int) -> bool:
+        """Whether this company has been ingested at all.
+
+        Deliberately separate from any windowed read. "No filing in the last
+        two years" and "we have never ingested this company" produce the same
+        empty list and are entirely different statements -- one is about the
+        company, the other about Tradabot.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM research_events WHERE company_id = ? LIMIT 1", (company_id,)
+            ).fetchone()
+        return row is not None
 
     def count(self) -> int:
         with self._connect() as connection:

@@ -274,12 +274,22 @@ class ResearchEvent:
     historical_evidence: HistoricalEvidence = HistoricalEvidence.NOT_ESTABLISHED
 
     supersedes_event_id: str | None = None
+    superseded_at: str | None = None
+    """When a later filing superseded this event, if one did. Read at query
+    time rather than acted on at write time: the row is never removed, so a
+    question asked about a date *before* the amendment still sees the original.
+    ``None`` on every event the store has not superseded."""
     amends_accession: str | None = None
     """The accession this filing amends, when the form marks it an amendment.
     Recorded separately from ``supersedes_event_id`` because knowing a filing
     is an amendment is not the same as knowing which event it supersedes."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def base_form(self) -> str:
+        """``6-K/A`` -> ``6-K``. The regime the filing belongs to."""
+        return self.form[:-2] if self.form.endswith("/A") else self.form
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -312,6 +322,7 @@ class ResearchEvent:
             "interpretation": None,
             "historical_evidence": str(self.historical_evidence),
             "supersedes_event_id": self.supersedes_event_id,
+            "superseded_at": self.superseded_at,
             "amends_accession": self.amends_accession,
         }
 

@@ -52,6 +52,12 @@ FRESHNESS_DAYS: Final[dict[EventKind, int]] = {
 
 DEFAULT_DAYS: Final = 90
 
+MAX_WINDOW_DAYS: Final = max([*FRESHNESS_DAYS.values(), DEFAULT_DAYS])
+"""The longest any event stays current. Nothing published earlier than this
+before a given moment can qualify under *any* kind's window, which lets a
+consumer bound its query instead of reading a filer's whole history and
+discarding it -- measured at 904 events for Novo Nordisk."""
+
 
 def window_days(kind: EventKind) -> int:
     """How long an event of this kind reads as current."""

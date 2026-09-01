@@ -403,6 +403,132 @@ def _peer_field(check: StockCheck) -> str | None:
     return "\n".join(parts)
 
 
+_MAX_FIELD: Final = 1024
+"""Discord's hard limit on one embed field value."""
+
+_MAX_FIGURES: Final = 2
+"""Figures printed per filing. An earnings release that yielded revenue and a
+margin says enough in two lines; a third turns a development into a table the
+card already has above it."""
+
+_DEVELOPMENT_COVERAGE: Final[dict[str, str]] = {
+    "NO_CURRENT_EVENTS": (
+        "No SEC filing within its currency window. Tradabot covers this "
+        "company's filings; none recent enough qualifies."
+    ),
+    "NO_COVERAGE": (
+        "Unavailable — Tradabot has not ingested SEC filings for this company yet. "
+        "This is a gap in coverage, not a statement about the company."
+    ),
+    "UNAVAILABLE": "Unavailable — the research store has not been built.",
+    "NOT_APPLICABLE": ("Not applicable — this is a fund, which files no company reports."),
+}
+"""One sentence per coverage state, and they are deliberately not
+interchangeable. "No qualifying filing", "we never ingested this company" and
+"there is no research store" look identical on a card that says only
+*unavailable*, and a reader who cannot tell them apart cannot tell whether the
+silence is about the company or about Tradabot."""
+
+
+def _developments_field(check: StockCheck) -> str | None:
+    """What this company is currently known to have filed, or why nothing shows.
+
+    Returns ``None`` only when the research layer was never wired in -- an
+    absent section rather than a section announcing its own absence, the same
+    convention peer context uses.
+
+    Nothing here is directional. The filing kind, the SEC item and the
+    materiality band are all statements about *what was disclosed and how much
+    attention it warrants*, never about whether it is good news, and the section
+    closes by saying outright that no historical price evidence backs any of it.
+    """
+    report = getattr(check, "developments", None)
+    if report is None:
+        return None
+    status = str(report.status)
+    if not report.has_developments:
+        if status == "SOURCE_LIMITATION":
+            return (
+                f"Partial coverage — {report.detail}. "
+                f"This does not mean nothing happened at this company."
+            )
+        if status == "NO_CURRENT_EVENTS" and report.periodic_current:
+            return f"No recent event filing — {report.detail}."
+        return _DEVELOPMENT_COVERAGE.get(status, "Unavailable.")
+
+    blocks = [_development(d) for d in report.developments]
+    # Stated once for the section rather than once per filing: it is true of
+    # every event kind here, and repeating it three times would make the one
+    # thing the section refuses to claim its most prominent feature.
+    footers = [_more(report), "_Historical price evidence: not established for these event types._"]
+    return _within_limit(blocks, [f for f in footers if f])
+
+
+def _more(report: Any) -> str:
+    """One line for everything not shown, rather than two."""
+    parts = []
+    if report.suppressed:
+        parts.append(f"{report.suppressed} further qualifying filing(s)")
+    if str(report.status) == "PARTIAL" and report.unclassified_current:
+        parts.append(f"{report.unclassified_current} recent filing(s) carrying no item codes")
+    return f"_Not shown: {' · '.join(parts)}._" if parts else ""
+
+
+def _within_limit(blocks: list[str], footers: list[str]) -> str:
+    """Whole filings, dropped from the end until the field fits.
+
+    Discord truncates a field over 1,024 characters mid-word, which on this
+    section would cut a figure away from the period it belongs to or a source
+    link away from the claim it supports. Dropping the least recent filing
+    whole, and saying so, keeps every line that survives complete.
+    """
+    dropped = 0
+    while blocks:
+        tail = list(footers)
+        if dropped:
+            tail.insert(0, f"_{dropped} further filing(s) omitted for length._")
+        candidate = "\n".join([*blocks, *tail])
+        if len(candidate) <= _MAX_FIELD:
+            return candidate
+        blocks.pop()
+        dropped += 1
+    return "\n".join(footers)
+
+
+def _development(development: Any) -> str:
+    """One filing: what it reported, when, and what backs it."""
+    labels = " · ".join(dict.fromkeys(i.label for i in development.items))
+    when = _pretty_date(development.published_at[:10])
+    items = ", ".join(f"Item {i.item}" for i in development.items if i.item)
+    source = f"{development.form}{f' · {items}' if items else ''}"
+    lines = [
+        f"**{labels}** · {when}",
+        f"{source} · Materiality: {str(development.materiality).capitalize()}",
+    ]
+    for figure in development.figures[:_MAX_FIGURES]:
+        lines.append(f"{figure.label}: {_figure_value(figure)} — {figure.period}")
+    if not development.figures:
+        lines.append(
+            "Primary-source evidence available; structured figures were not extracted safely."
+            if development.evidence_available
+            else "No primary-source document was retrieved for this filing."
+        )
+    if development.source_url:
+        lines.append(f"[SEC filing]({development.source_url})")
+    if development.amends_accession:
+        lines.append("_This filing amends an earlier one._")
+    return "\n".join(lines)
+
+
+def _figure_value(figure: Any) -> str:
+    """A reported figure, formatted the way the rest of the card formats money."""
+    if figure.unit == "PERCENT":
+        return f"{figure.value:.1f}%"
+    if figure.unit == "CURRENCY_PER_SHARE":
+        return f"{_symbol_for(figure.currency)}{figure.value:,.2f}"
+    return _money(figure.value, figure.currency)
+
+
 def _ordinal(percentile: float) -> str:
     """``90.0`` -> ``90th``. Rounded to whole points: the sample supporting a
     percentile is never fine enough to justify a decimal place."""
@@ -465,18 +591,44 @@ def _dominant_colour(check: StockCheck) -> int:
     ]
     if {"MATERIAL_DILUTION", "LEVERAGED"} & set(states):
         return presentation.COLOURS[presentation.Semantic.BAD]
+    return presentation.COLOURS[_attention(check, report)]
+
+
+def _attention(check: StockCheck, report: Any) -> presentation.Semantic:
+    """How much attention the card asks for, once nothing is presently wrong.
+
+    ORANGE means "unusual and worth inspecting; no direction implied" -- the
+    existing vocabulary's only non-directional attention state, and exactly what
+    a restatement or a change of control is. It is deliberately limited to
+    CRITICAL developments: SIGNIFICANT covers every earnings release, so letting
+    it colour the card would turn it orange four times a year and mean nothing.
+
+    A development can never produce GREEN or RED. An SEC item establishes what
+    was disclosed, never whether it was welcome, and colouring a filing by its
+    materiality would turn an attention band into a verdict.
+    """
+    if _has_critical_development(check):
+        return presentation.Semantic.UNUSUAL
 
     confidence = str((getattr(report, "confidence", {}) or {}).get("company_analysis", ""))
     if confidence in ("LOW", "INSUFFICIENT"):
-        return presentation.COLOURS[presentation.Semantic.UNCERTAIN]
+        return presentation.Semantic.UNCERTAIN
 
     valuation = getattr(report, "valuation", None)
     context = (getattr(valuation, "labels", {}) or {}).get("ps_context", "")
     if context in ("VERY_HIGH_VS_HISTORY", "VERY_LOW_VS_HISTORY"):
-        return presentation.COLOURS[presentation.Semantic.UNUSUAL]
+        return presentation.Semantic.UNUSUAL
 
     # A descriptive report about a sound company is still a descriptive report.
-    return presentation.COLOURS[presentation.Semantic.NEUTRAL]
+    return presentation.Semantic.NEUTRAL
+
+
+def _has_critical_development(check: StockCheck) -> bool:
+    """Whether a current filing sits in the highest attention band."""
+    report = getattr(check, "developments", None)
+    if report is None:
+        return False
+    return any(str(d.materiality) == "CRITICAL" for d in report.developments)
 
 
 def _summary_bullets(check: StockCheck) -> list[str]:
@@ -752,6 +904,9 @@ def check_message(check: StockCheck) -> NotificationMessage:
     peer_field = _peer_field(check)
     if peer_field is not None:
         fields["Peer context"] = peer_field
+    developments = _developments_field(check)
+    if developments is not None:
+        fields["Current developments"] = developments
     fields["Data quality"] = _data_quality_field(check)
 
     bullets = _summary_bullets(check)

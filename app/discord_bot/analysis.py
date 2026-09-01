@@ -128,6 +128,11 @@ class StockCheck:
     """The :class:`~app.peers.schemas.PeerComparison`, when one was computed.
     Carries its own refusal, so ``None`` means the peer layer was not wired in
     at all rather than that the comparison was declined."""
+    developments: Any = None
+    """The :class:`~app.research_intelligence.developments.CurrentDevelopments`
+    report. Same convention as ``peers``: ``None`` means the research layer was
+    not wired in, while a report carrying ``UNAVAILABLE`` means it was and the
+    store is missing. Those are different things and the card says so."""
 
     @property
     def analysable(self) -> bool:
@@ -170,6 +175,7 @@ class StockAnalyst:
         as_of: str,
         registry: Any = None,
         peers: Any = None,
+        developments: Any = None,
     ) -> None:
         self._advisor = advisor
         self._universe = universe
@@ -181,6 +187,10 @@ class StockAnalyst:
         """Peer comparison service. Optional: a bot wired without one answers
         exactly as before, so the card degrades by omitting a section rather
         than by failing."""
+        self._developments = developments
+        """Current-developments service. Optional on the same terms, and it
+        reads only the local research store -- ``/check`` performs no network
+        request, so SEC being slow or unreachable cannot delay a card."""
         """Company/listing registry. When present it owns resolution, so a bare
         ticker naming two companies refuses instead of picking one."""
 
@@ -248,6 +258,19 @@ class StockAnalyst:
         if self._peers is not None and listing is not None and report is not None:
             with clock.stage("peers"):
                 peers = self._peers.compare(listing, report, as_of=self._as_of)
+        developments = None
+        if self._developments is not None and listing is not None:
+            with clock.stage("developments"):
+                # Asked by resolved company identity, never by ticker, so every
+                # listing of one issuer sees one event history and a ticker
+                # collision cannot reach another company's filings.
+                developments = self._developments.for_company(
+                    company_id=getattr(listing, "company_id", None),
+                    cik=getattr(listing, "cik", None),
+                    as_of=self._as_of,
+                    company_key=_company_key(listing),
+                    asset_type=str(getattr(listing, "asset_type", "STOCK")),
+                )
         return StockCheck(
             requested=found.requested,
             symbol=found.symbol,
@@ -264,6 +287,7 @@ class StockAnalyst:
             candidates=found.candidates,
             valuation_refusal=_valuation_refusal(listing),
             peers=peers,
+            developments=developments,
         )
 
     # ------------------------------------------------------------- internals
