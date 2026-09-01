@@ -363,6 +363,21 @@ class FactStore:
             provenance=(_provenance(row, row["value"]),),
         )
 
+    def annual_rows(self, symbol: str, metric: str, as_of: str) -> list[dict[str, Any]]:
+        """Fiscal-year rows known at ``as_of``, unaggregated.
+
+        For consumers that need the annual series itself rather than a single
+        latest value -- a foreign private issuer files annually, so an annual
+        series is the only history it has. The point-in-time filter stays here
+        rather than at the call site, so no consumer can accidentally read a
+        row that was not yet public.
+        """
+        return [
+            r
+            for r in self._known(symbol, metric, as_of)
+            if (span := _duration(r)) is not None and _ANNUAL_MIN <= span <= _ANNUAL_MAX
+        ]
+
     def instant(self, symbol: str, metric: str, as_of: str) -> TtmResult:
         """Latest balance-sheet value known at ``as_of``."""
         rows = [r for r in self._known(symbol, metric, as_of) if r.get("period_end")]

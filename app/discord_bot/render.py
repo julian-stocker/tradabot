@@ -49,6 +49,13 @@ to show: a reader does not need to know which share family a figure came from.""
 
 _MAX_BULLETS: Final = 4
 
+_PARTIAL_SECTION: Final = (
+    "_Partial — the figures shown are as filed; other line items this section "
+    "needs were not reported._"
+)
+"""Said when a section shows numbers and still cannot be assessed. Distinct
+from "Insufficient data", which belongs where there is nothing to show."""
+
 _PEER_EXAMPLES: Final = 5
 """Peer symbols named on the card. Enough to show what kind of company is in
 the group; the full membership always stays on the ``PeerComparison`` for any
@@ -313,6 +320,15 @@ def _quality_fields(
         if name == "BALANCE SHEET" and (net := _net_position(section, currency)) is not None:
             rows.append(net)
         states = _state_lines(section, overall=overall)
+        if rows and states == [presentation.state("INSUFFICIENT_DATA").label]:
+            # Figures are printed and the section still says "Insufficient
+            # data", which reads as though the numbers above it are unreliable.
+            # They are not -- they are the company's own filings, and what is
+            # missing is whatever else the assessment needed. Coca-Cola shows
+            # Cash $10.57B under this heading and stopped reporting the debt
+            # concepts, so the section cannot be assessed while the figure it
+            # does show is exact.
+            states = [_PARTIAL_SECTION]
         note = _sector_note(section) or _ifrs_note(name, section, taxonomy)
         if note is not None:
             # Replace the generic state, do not stack a second sentence on it.
@@ -401,6 +417,160 @@ def _peer_field(check: StockCheck) -> str | None:
     if sentence:
         parts.append(sentence)
     return "\n".join(parts)
+
+
+_TRAJECTORY_BUDGET: Final = 520
+"""Characters the trajectory section may occupy. A budget, not a limit: the
+card already reaches ~2,600 characters, and a fourth block of numbers turns a
+report into a spreadsheet. Entries are dropped whole from the end."""
+
+_PERCENTILE_METRICS: Final[frozenset[str]] = frozenset(
+    {"operating_margin", "fcf_margin", "gross_margin", "share_count"}
+)
+"""Metrics whose own-history percentile carries information.
+
+Revenue is deliberately absent, on measurement. Its percentile has a **median
+of 98 across the universe and sits at or above the 95th for 60% of companies**
+-- an absolute quantity that trends upward is nearly always at its own record,
+so the number says "this company has grown" and nothing else. The ratios
+discriminate properly: operating and free-cash-flow margin both have a median
+near the 60th with a fifth of companies at each extreme, and share count has a
+median of the 19th because most companies are near their lowest count."""
+
+_TRAJECTORY_ORDER: Final[tuple[tuple[str, str], ...]] = (
+    ("revenue", "Revenue"),
+    ("operating_margin", "Operating margin"),
+    ("fcf_margin", "FCF margin"),
+    ("share_count", "Shares outstanding"),
+    ("gross_margin", "Gross margin"),
+)
+"""Economic scale, then operating profitability, then cash generation, then
+capital structure. Gross margin sits last because operating margin says more
+about the same thing and covers 69% of the universe against gross margin's
+48%; it appears only when the budget is not already spent."""
+
+_MAX_TRAJECTORIES: Final = 4
+"""Entries shown. Four already occupies a fifth of the card, and the fifth
+candidate is gross margin, which says less than the operating margin above it."""
+
+_TRAJECTORY_WINDOW: Final = "3y"
+_TRAJECTORY_FALLBACK: Final = "1y"
+
+_DIRECTION_WORDS: Final[dict[str, str]] = {
+    "EXPANDING": "expanding",
+    "COMPRESSING": "compressing",
+    "INCREASING": "increasing",
+    "DECREASING": "decreasing",
+    "STABLE": "broadly flat",
+}
+
+
+def _trajectory_field(check: StockCheck) -> str | None:
+    """What this company's economics have already done, or nothing.
+
+    Every line is arithmetic over filings that were public at the time. There
+    is no projection here and no verdict: a compressing margin is a fact about
+    the past, and whether it is bad depends on why -- a judgement this system
+    does not make.
+    """
+    report = getattr(check, "trajectory", None)
+    if report is None:
+        return None
+    entries: list[str] = []
+    for metric, label in _TRAJECTORY_ORDER:
+        if len(entries) >= _MAX_TRAJECTORIES:
+            break
+        found = report.get(metric)
+        if found is None or not found.available:
+            continue
+        line = _trajectory_entry(found, label)
+        if line is None:
+            continue
+        if sum(len(e) + 1 for e in [*entries, line]) > _TRAJECTORY_BUDGET:
+            break
+        entries.append(line)
+    if not entries:
+        return _no_trajectory(report)
+    return "\n".join(entries)
+
+
+def _no_trajectory(report: Any) -> str | None:
+    """One sentence when nothing is comparable, naming which limit applied."""
+    statuses = {str(t.status) for t in report.metrics.values()}
+    if "NOT_APPLICABLE" in statuses:
+        return "Not applicable — a fund has no operations to have a trajectory."
+    if "SECTOR_MODEL_REQUIRED" in statuses:
+        return (
+            "Unavailable — revenue, margins and cash flow are not comparable "
+            "quantities for a financial company, so no trajectory is drawn."
+        )
+    if "INSUFFICIENT_HISTORY" in statuses:
+        return "Unavailable — too little contiguous reported history."
+    return "Unavailable — no comparable reported history."
+
+
+def _trajectory_entry(found: Any, label: str) -> str | None:
+    """One metric: where it was, where it is, and where that sits in its past."""
+    change = found.changes.get(_TRAJECTORY_WINDOW) or found.changes.get(_TRAJECTORY_FALLBACK)
+    if change is None:
+        return None
+    ratio = found.unit == "ratio"
+    now = _trajectory_value(found.current, ratio, found.unit)
+    then = _trajectory_value(change.from_value, ratio, found.unit)
+    movement = (
+        f"{change.absolute:+.1f} pp"
+        if ratio
+        else (
+            f"{change.annualised * 100:+.1f}%/yr"
+            if change.annualised is not None
+            else f"{(change.relative or 0) * 100:+.1f}%"
+        )
+    )
+    tail = (
+        f" · {_ordinal(found.percentile)} pct of own history"
+        if found.percentile is not None and found.metric in _PERCENTILE_METRICS
+        else ""
+    )
+    line = f"**{label}** {then} → {now} over {change.window} · {movement}{tail}"
+    note = _recent_note(found, change)
+    return f"{line}\n{note}" if note else line
+
+
+def _recent_note(found: Any, change: Any) -> str:
+    """The last year, but only when it disagrees with the longer window.
+
+    Printing "broadly flat" under every entry that was broadly flat for three
+    years costs a line and says the same thing twice. What earns a line is a
+    company whose three-year direction and most recent year point opposite
+    ways: a margin that expanded for three years and compressed in the last one
+    is two facts, not one.
+    """
+    word = _DIRECTION_WORDS.get(str(found.direction or ""))
+    if word is None or change.window == _TRAJECTORY_FALLBACK:
+        return ""
+    if str(found.direction) == "STABLE":
+        # A flat year under a flat three years is the same fact twice.
+        return ""
+    recent = found.changes.get(_TRAJECTORY_FALLBACK)
+    if recent is None or change.absolute == 0:
+        return ""
+    if (recent.absolute >= 0) == (change.absolute >= 0):
+        return ""
+    return f"_Over the last year alone: {word}._"
+
+
+def _trajectory_value(value: float | None, ratio: bool, unit: str) -> str:
+    """A trajectory value in the card's existing notation for its own kind."""
+    if value is None:
+        return "—"
+    if ratio:
+        return f"{value * 100:.1f}%"
+    if str(unit).lower() == "shares":
+        # A share count is a count, not an amount. Routing it through the money
+        # formatter printed "SHARES 15.65B" -- the unit that makes the figure
+        # auditable became a currency prefix.
+        return _count(value)
+    return _money(value, unit)
 
 
 _MAX_FIELD: Final = 1024
@@ -926,6 +1096,9 @@ def check_message(check: StockCheck) -> NotificationMessage:
     peer_field = _peer_field(check)
     if peer_field is not None:
         fields["Peer context"] = peer_field
+    trajectory = _trajectory_field(check)
+    if trajectory is not None:
+        fields["Company trajectory"] = trajectory
     developments = _developments_field(check)
     if developments is not None:
         fields["Current developments"] = developments

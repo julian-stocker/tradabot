@@ -80,7 +80,13 @@ RECOMPUTED = (
     "percentile =",
     "pstdev",
     "def _correlation",
-    "annualis",
+    # Computing a compound rate, not printing one. The history layer owns the
+    # arithmetic and this package reads `change.annualised` off the result --
+    # the same distinction the percentile entries above draw, and the same
+    # mistake a bare-word ban makes: it forbids the read along with the
+    # arithmetic, which is the one thing this package exists to do.
+    "annualised =",
+    "** (1 /",
     "herfindahl",
 )
 

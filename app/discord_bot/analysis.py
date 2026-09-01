@@ -128,6 +128,10 @@ class StockCheck:
     """The :class:`~app.peers.schemas.PeerComparison`, when one was computed.
     Carries its own refusal, so ``None`` means the peer layer was not wired in
     at all rather than that the comparison was declined."""
+    trajectory: Any = None
+    """The :class:`~app.history.schemas.CompanyTrajectory`. ``None`` when the
+    history layer was not wired in; a report whose metrics all carry a refusal
+    means it was, and the company has no comparable history."""
     developments: Any = None
     """The :class:`~app.research_intelligence.developments.CurrentDevelopments`
     report. Same convention as ``peers``: ``None`` means the research layer was
@@ -176,6 +180,7 @@ class StockAnalyst:
         registry: Any = None,
         peers: Any = None,
         developments: Any = None,
+        history: Any = None,
     ) -> None:
         self._advisor = advisor
         self._universe = universe
@@ -187,6 +192,9 @@ class StockAnalyst:
         """Peer comparison service. Optional: a bot wired without one answers
         exactly as before, so the card degrades by omitting a section rather
         than by failing."""
+        self._history = history
+        """Company trajectory service. Reads the same fact store the Advisor
+        already holds, so it adds no load and no new dependency."""
         self._developments = developments
         """Current-developments service. Optional on the same terms, and it
         reads only the local research store -- ``/check`` performs no network
@@ -258,6 +266,18 @@ class StockAnalyst:
         if self._peers is not None and listing is not None and report is not None:
             with clock.stage("peers"):
                 peers = self._peers.compare(listing, report, as_of=self._as_of)
+        trajectory = None
+        if self._history is not None and listing is not None and report is not None:
+            with clock.stage("history"):
+                # Asked by company identity, exactly as the Advisor is: two
+                # listings of one issuer share one filing history.
+                trajectory = self._history.for_company(
+                    company_key=_company_key(listing) or found.symbol,
+                    as_of=self._as_of,
+                    company_id=getattr(listing, "company_id", None),
+                    sic=getattr(listing, "sic", None),
+                    asset_type=str(getattr(listing, "asset_type", "STOCK")),
+                )
         developments = None
         if self._developments is not None and listing is not None:
             with clock.stage("developments"):
@@ -287,6 +307,7 @@ class StockAnalyst:
             candidates=found.candidates,
             valuation_refusal=_valuation_refusal(listing),
             peers=peers,
+            trajectory=trajectory,
             developments=developments,
         )
 

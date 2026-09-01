@@ -2347,12 +2347,19 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     # Reads only local SQLite -- /check makes no network request.
     developments = CurrentDevelopmentsService(store=EventStore.open_existing(), facts=facts)
 
+    from app.history import CompanyHistoryService  # noqa: PLC0415
+
+    # Reads the fact store the Advisor already holds in memory: no second load,
+    # no new dependency, no network.
+    history = CompanyHistoryService(facts=facts)
+
     # No broker handle: /check answers a company question, so an Alpaca outage
     # cannot slow it down or degrade it.
     return StockAnalyst(
         registry=registry,
         peers=peers,
         developments=developments,
+        history=history,
         advisor=advisor,
         universe=sorted(prices),
         fundamentals=frozenset(facts.symbols) if state.ok else frozenset(),
