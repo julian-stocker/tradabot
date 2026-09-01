@@ -2368,6 +2368,155 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     )
 
 
+def _screen(settings: Settings, args: argparse.Namespace) -> int:
+    """Find covered companies matching stated conditions. Never trades.
+
+    A match is a company whose filings satisfy the conditions asked for. It is
+    not a recommendation, and there is no ordering by desirability -- results
+    are alphabetical unless a metric is explicitly named to sort by.
+    """
+    import json as _json  # noqa: PLC0415
+
+    from app.advisor import AdvisorService, FactStore  # noqa: PLC0415
+    from app.fundamentals import health  # noqa: PLC0415
+    from app.history import CompanyHistoryService  # noqa: PLC0415
+    from app.instruments.registry import load as load_registry  # noqa: PLC0415
+    from app.screener import (  # noqa: PLC0415
+        Criterion,
+        InvalidCriterionError,
+        Operator,
+        ScreenerService,
+        describe,
+    )
+
+    if args.list_metrics:
+        for row in describe():
+            print(
+                f"{row['key']:34} {row['unit']:18} {row['cost']:13} "
+                f"{'financials ok' if row['financial_ok'] else 'non-financial':15} "
+                f"{row['label']}"
+            )
+        return 0
+
+    criteria: list[Criterion] = []
+    for raw in args.where or []:
+        try:
+            metric, operator, value = raw.split(":", 2)
+        except ValueError:
+            print(f"malformed --where {raw!r}; expected metric:operator:value")
+            return 1
+        try:
+            parsed: Any = float(value)
+        except ValueError:
+            parsed = {"true": True, "false": False}.get(value.lower(), value)
+        try:
+            criteria.append(Criterion(metric.strip(), Operator(operator.strip()), parsed))
+        except ValueError:
+            print(f"unknown operator {operator!r}; use gte, lte, gt, lt, eq or neq")
+            return 1
+
+    facts_path = Path(args.facts)
+    state = health(facts_path)
+    facts = FactStore.from_parquet(facts_path) if state.ok else FactStore([])
+    registry = load_registry(_database_file(settings))
+    advisor = None
+    if any(_needs_advisor(c.metric) for c in criteria) or _needs_advisor(args.sort or ""):
+        advisor = AdvisorService(
+            facts,
+            _advisor_prices(settings, None),
+            sectors=_advisor_sectors(),
+            company_sectors=_company_sectors(),
+        )
+    developments = None
+    if any(c.metric.startswith(("has_current", "development_")) for c in criteria):
+        from app.research_intelligence.developments import (  # noqa: PLC0415
+            CurrentDevelopmentsService,
+        )
+        from app.research_intelligence.store import EventStore  # noqa: PLC0415
+
+        developments = CurrentDevelopmentsService(store=EventStore.open_existing(), facts=facts)
+
+    service = ScreenerService(
+        registry_snapshot=registry,
+        history=CompanyHistoryService(facts=facts),
+        advisor=advisor,
+        developments=developments,
+    )
+    as_of = args.as_of or max(
+        (max(v.closes) for v in _advisor_prices(settings, None).values() if v.closes),
+        default=datetime.now(UTC).date().isoformat(),
+    )
+    try:
+        result = service.screen(
+            criteria,
+            as_of=as_of,
+            limit=args.limit,
+            sort_metric=args.sort,
+            descending=args.desc,
+        )
+    except InvalidCriterionError as exc:
+        print(f"invalid screen: {exc}")
+        return 1
+
+    if args.json:
+        print(_json.dumps(result.as_dict(), indent=1))
+        return 0
+    _print_screen(result)
+    return 0
+
+
+def _needs_advisor(metric: str) -> bool:
+    from app.screener import get  # noqa: PLC0415
+
+    found = get(metric)
+    return found is not None and str(found.cost) == "ADVISOR"
+
+
+def _print_screen(result: Any) -> None:
+    """The criteria, the coverage, and why each company matched."""
+    from app.screener import get  # noqa: PLC0415
+
+    print(f"\nas of {result.as_of}")
+    print("criteria:")
+    for criterion in result.criteria:
+        found = get(criterion.metric)
+        print(
+            f"  {criterion.describe(found.label if found else None, found.unit if found else '')}"
+        )
+    print(
+        f"\nuniverse {result.universe}  ·  evaluated {result.evaluated}  ·  "
+        f"matched {result.matched}  ·  not evaluable {result.not_evaluable}"
+    )
+    if result.reasons:
+        print("not evaluable because:")
+        for reason, count in result.reasons.items():
+            print(f"  {count:5}  {reason}")
+    order = (
+        f"sorted by {result.sort_metric} {'descending' if result.descending else 'ascending'}"
+        if result.sort_metric
+        else "alphabetical by symbol"
+    )
+    shown = len(result.candidates)
+    print(f"\nshowing {shown} of {result.matched} matched, {order}")
+    for candidate in result.candidates:
+        print(f"\n{candidate.symbol}  {candidate.company_name}  [{candidate.listing}]")
+        for item in candidate.results:
+            found = get(item.criterion.metric)
+            unit = found.unit if found else ""
+            label = found.label if found else item.criterion.metric
+            from app.screener.schemas import SYMBOLS, _format  # noqa: PLC0415
+
+            required = f"{SYMBOLS[item.criterion.operator]} {_format(item.criterion.value, unit)}"
+            print(f"    {label:32} {_format(item.observed, unit):>12}   [required {required}]")
+    if result.truncated:
+        print(f"\n{result.truncated} further matched companies not shown")
+    print(f"\n{result.duration_seconds:.1f}s")
+    print(
+        "A match states that a company's filings satisfy these conditions. "
+        "It is not a recommendation."
+    )
+
+
 def _ingest_research(settings: Settings, args: argparse.Namespace) -> int:
     """Keep the SEC research store current. Reads SEC; never trades.
 
@@ -2782,6 +2931,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "publish": _publish,
     "heartbeat": _heartbeat,
     "ingest-research": _ingest_research,
+    "screen": _screen,
     "discord-bot": _discord_bot,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
@@ -2946,6 +3096,28 @@ def _add_publish_parser(sub: argparse._SubParsersAction) -> None:  # type: ignor
             )
 
 
+def _add_screen_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """Deterministic company discovery."""
+    screen = sub.add_parser(
+        "screen", help="Find covered companies matching stated conditions (never a recommendation)"
+    )
+    screen.add_argument(
+        "--where",
+        action="append",
+        metavar="METRIC:OP:VALUE",
+        help="A condition, e.g. operating_margin:gte:0.25. Repeat for AND.",
+    )
+    screen.add_argument("--as-of", dest="as_of", default=None, help="Screen as of a past date")
+    screen.add_argument("--limit", type=int, default=20, help="Rows shown (max 50)")
+    screen.add_argument("--sort", default=None, help="Order by this metric instead of by symbol")
+    screen.add_argument("--desc", action="store_true", help="Sort descending")
+    screen.add_argument("--json", action="store_true", help="Emit the full structured result")
+    screen.add_argument(
+        "--list-metrics", action="store_true", help="Show every screenable metric and exit"
+    )
+    screen.add_argument("--facts", default="data/sec_facts.parquet", help="Fact store path")
+
+
 def _add_research_ingestion_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Recurring SEC research ingestion."""
     ingest = sub.add_parser(
@@ -2980,6 +3152,7 @@ def _add_research_ingestion_parser(sub: argparse._SubParsersAction) -> None:  # 
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Portfolio and operations commands."""
     _add_research_ingestion_parser(sub)
+    _add_screen_parser(sub)
     advisor = sub.add_parser(
         "advisor", help="Factual read-only company report (never a recommendation)"
     )
