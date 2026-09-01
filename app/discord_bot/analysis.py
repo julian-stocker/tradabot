@@ -82,17 +82,14 @@ def _market_identity(listing: Any) -> Any:
     if listing is None:
         return None
     from app.advisor.service import MarketIdentity  # noqa: PLC0415
-    from app.instruments.registry import benchmark_for  # noqa: PLC0415
+    from app.instruments.registry import market_inputs  # noqa: PLC0415
 
-    return MarketIdentity(
-        series=listing.symbol if listing.has_prices else None,
-        benchmark=benchmark_for(listing),
-        # One owner for the currency rule. `_valuation_refusal` already asks
-        # `valuation_allowed` for the sentence the card prints; the report is
-        # told the same thing, so a consumer reading `pe_ttm` directly cannot
-        # get Novo Nordisk's 1.99x while the card is refusing to show it.
-        unit_mismatch=_valuation_refusal(listing) if listing.has_prices else None,
-    )
+    # One owner for all three rules. `market_inputs` composes `valuation_allowed`
+    # and `benchmark_for`, so a consumer reading `pe_ttm` directly cannot get
+    # Novo Nordisk's 1.99x while the card is refusing to show it -- and the peer
+    # layer builds its market identities from the same function.
+    series, benchmark, mismatch = market_inputs(listing)
+    return MarketIdentity(series=series, benchmark=benchmark, unit_mismatch=mismatch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +124,10 @@ class StockCheck:
     not. Distinct from having no prices: a US-listed foreign issuer *has* prices
     and still cannot be given a P/E, because the price and the earnings are in
     different currencies and Tradabot performs no conversion."""
+    peers: Any = None
+    """The :class:`~app.peers.schemas.PeerComparison`, when one was computed.
+    Carries its own refusal, so ``None`` means the peer layer was not wired in
+    at all rather than that the comparison was declined."""
 
     @property
     def analysable(self) -> bool:
@@ -168,6 +169,7 @@ class StockAnalyst:
         fact_store_ready: bool,
         as_of: str,
         registry: Any = None,
+        peers: Any = None,
     ) -> None:
         self._advisor = advisor
         self._universe = universe
@@ -175,6 +177,10 @@ class StockAnalyst:
         self._ready = fact_store_ready
         self._as_of = as_of
         self._registry = registry
+        self._peers = peers
+        """Peer comparison service. Optional: a bot wired without one answers
+        exactly as before, so the card degrades by omitting a section rather
+        than by failing."""
         """Company/listing registry. When present it owns resolution, so a bare
         ticker naming two companies refuses instead of picking one."""
 
@@ -238,6 +244,10 @@ class StockAnalyst:
 
         if found.resolution is Resolution.DATA_NOT_SYNCED:
             notes.append("Company fundamentals are unavailable until the fact store is synced.")
+        peers = None
+        if self._peers is not None and listing is not None and report is not None:
+            with clock.stage("peers"):
+                peers = self._peers.compare(listing, report, as_of=self._as_of)
         return StockCheck(
             requested=found.requested,
             symbol=found.symbol,
@@ -253,6 +263,7 @@ class StockAnalyst:
             listing=listing,
             candidates=found.candidates,
             valuation_refusal=_valuation_refusal(listing),
+            peers=peers,
         )
 
     # ------------------------------------------------------------- internals

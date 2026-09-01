@@ -2326,10 +2326,21 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     advisor = AdvisorService(facts, prices, sectors=sectors, company_sectors=_company_sectors())
     as_of = max((max(v.closes) for v in prices.values() if v.closes), default="")
 
+    from app.peers import PeerComparisonService, PeerUniverse  # noqa: PLC0415
+
+    registry = load_registry(_database_file(settings))
+    # Peer groups are computed lazily and cached per (industry, as_of), so this
+    # costs nothing at startup -- building all 858 comparable issuers up front
+    # would add ~45s to serve groups nobody asked for.
+    peers = PeerComparisonService(
+        universe=PeerUniverse(registry.all_candidates()), advisor=advisor, facts=facts
+    )
+
     # No broker handle: /check answers a company question, so an Alpaca outage
     # cannot slow it down or degrade it.
     return StockAnalyst(
-        registry=load_registry(_database_file(settings)),
+        registry=registry,
+        peers=peers,
         advisor=advisor,
         universe=sorted(prices),
         fundamentals=frozenset(facts.symbols) if state.ok else frozenset(),

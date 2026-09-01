@@ -49,6 +49,11 @@ to show: a reader does not need to know which share family a figure came from.""
 
 _MAX_BULLETS: Final = 4
 
+_PEER_EXAMPLES: Final = 5
+"""Peer symbols named on the card. Enough to show what kind of company is in
+the group; the full membership always stays on the ``PeerComparison`` for any
+consumer that wants to audit it."""
+
 _DISPLAY_TOLERANCE: Final = 0.0005
 """Half of the smallest visible step at one-decimal percentage precision.
 
@@ -340,6 +345,78 @@ def _valuation_field(report: Any) -> str:
     if context.explanation:
         parts.append(f"_{context.explanation}_")
     return "\n".join(parts)
+
+
+def _peer_field(check: StockCheck) -> str | None:
+    """Where this company sits among comparable companies, or nothing.
+
+    Returns ``None`` when the peer layer is not wired in at all -- an absent
+    section rather than a section announcing its own absence. A *refused*
+    comparison does render, with its reason, because "no comparable peer group
+    exists" is information about the company.
+    """
+    peers = getattr(check, "peers", None)
+    if peers is None:
+        return None
+    if not peers.available:
+        return f"Unavailable — {peers.detail or 'no comparable peer group'}."
+
+    # `_value` already owns how a multiple and a percentage render on this card,
+    # and the peer metric keys are the Advisor's own, so the peer row and the
+    # row above it cannot disagree about what 33.82x looks like.
+    rows = [
+        (
+            c.label,
+            f"{_ordinal(c.percentile)} pct",
+            f"peer median {_value(c.metric, c.median)}",
+            _value(c.metric, c.value),
+        )
+        for c in peers.comparisons
+    ]
+    width = max(len(r[0]) for r in rows)
+    lines = [
+        f"{label.ljust(width)}  {value:>8}  {pct:>9}  {median}"
+        for label, pct, median, value in rows
+    ]
+    group = peers.group
+    block = "```\n" + "\n".join(lines) + "\n```"
+    # Named peers, alphabetically. Deterministic and, more to the point,
+    # unrelated to how the comparison came out -- an ordering that surfaced the
+    # closest or most flattering members would make the sample look chosen.
+    shown = sorted(m.symbol for m in group.included)[:_PEER_EXAMPLES]
+    examples = ", ".join(shown)
+    if group.size > _PEER_EXAMPLES:
+        examples += f" and {group.size - _PEER_EXAMPLES} more"
+    parts = [block, f"_Peers: {group.size} · {group.label} — {examples}_"]
+    if group.mixed_taxonomy:
+        # An industry group is assembled from what a company does, not from how
+        # it reports. Saying so is the honest middle ground between refusing
+        # international comparison and pretending the difference is not there.
+        parts.append(
+            f"_This company reports under {group.subject_taxonomy} while most of "
+            f"the group reports under {group.peer_taxonomy}; the percentages are "
+            f"comparable but not drawn to identical definitions._"
+        )
+    sentence = presentation_describe(peers)
+    if sentence:
+        parts.append(sentence)
+    return "\n".join(parts)
+
+
+def _ordinal(percentile: float) -> str:
+    """``90.0`` -> ``90th``. Rounded to whole points: the sample supporting a
+    percentile is never fine enough to justify a decimal place."""
+    value = round(percentile)
+    teens = 10 <= value % 100 <= 20  # noqa: PLR2004 - 11th, 12th, 13th
+    suffix = "th" if teens else {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+    return f"{value}{suffix}"
+
+
+def presentation_describe(peers: Any) -> str:
+    """The deterministic sentence, imported lazily to keep the boundary clean."""
+    from app.peers.service import describe  # noqa: PLC0415
+
+    return describe(peers)
 
 
 def _market_field(report: Any) -> str:
@@ -672,6 +749,9 @@ def check_message(check: StockCheck) -> NotificationMessage:
     else:
         fields["Fundamentals"] = "Unavailable."
         fields["Valuation"] = "Unavailable."
+    peer_field = _peer_field(check)
+    if peer_field is not None:
+        fields["Peer context"] = peer_field
     fields["Data quality"] = _data_quality_field(check)
 
     bullets = _summary_bullets(check)

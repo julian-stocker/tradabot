@@ -71,7 +71,13 @@ RECOMPUTED = (
     "operating_margin =",
     "gross_margin =",
     "free_cash_flow =",
-    "percentile",
+    # Computing a percentile, not naming one. The peer layer owns the midrank
+    # convention; this package reads `comparison.percentile` off the result and
+    # formats it, exactly as it reads a margin off a Section. Banning the bare
+    # word would forbid the read as well as the arithmetic, which is the one
+    # thing this package is supposed to do.
+    "percentile_rank(",
+    "percentile =",
     "pstdev",
     "def _correlation",
     "annualis",

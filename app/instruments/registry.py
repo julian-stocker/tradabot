@@ -117,6 +117,14 @@ class Candidate:
     """Whether the SEC knows this listing's issuer at all -- a CIK exists. Kept
     separate from :attr:`has_fundamentals` because they diverge for funds, and
     collapsing them is what produced the SPY card above."""
+    sic: str | None = None
+    """The SEC's own classification of what the issuer does, when it has one.
+
+    Carried here rather than fetched separately so that industry identity has
+    the same single owner as company and listing identity. A second lookup
+    would be a second place for the two to disagree, which is the defect the
+    registry exists to prevent."""
+    sic_description: str | None = None
 
     def __post_init__(self) -> None:
         """A fund can never have company fundamentals, however it was built.
@@ -227,6 +235,16 @@ class InstrumentRegistry:
     @property
     def symbols(self) -> frozenset[str]:
         return frozenset(self._by_symbol)
+
+    def all_candidates(self) -> tuple[Candidate, ...]:
+        """Every known listing, in a stable order.
+
+        Sorted by ``(mic, symbol)`` -- the unique key -- so any consumer that
+        builds a derived index from this gets identical membership on every
+        run. A cross-sectional statistic computed over an unstable ordering
+        would be reproducible only by accident.
+        """
+        return tuple(self._by_key[k] for k in sorted(self._by_key))
 
     def collisions(self) -> dict[str, list[Candidate]]:
         """Bare tickers that name more than one listing."""
@@ -357,6 +375,28 @@ def valuation_allowed(candidate: Candidate) -> tuple[bool, str | None]:
     return True, None
 
 
+def market_inputs(candidate: Candidate) -> tuple[str | None, str | None, str | None]:
+    """The three market facts a report about this listing may use.
+
+    Returns ``(series, benchmark, unit_mismatch)`` -- the price series key, the
+    validated benchmark, and the reason price-over-fundamentals ratios must be
+    withheld. Composed from :func:`valuation_allowed` and :func:`benchmark_for`,
+    which already own those two rules.
+
+    It lives here so every consumer builds a market identity the same way. Two
+    call sites deciding independently what a listing may read is how ``SAP.DE``
+    reached the ADR's price history in the first place; one function they both
+    call cannot drift.
+    """
+    priced = candidate.has_prices
+    allowed, reason = valuation_allowed(candidate)
+    return (
+        candidate.symbol if priced else None,
+        benchmark_for(candidate),
+        None if not priced or allowed else reason,
+    )
+
+
 def benchmark_for(candidate: Candidate) -> str | None:
     """The validated benchmark for a listing's country, or ``None``.
 
@@ -379,7 +419,8 @@ def load(database: str) -> InstrumentRegistry:
             "SELECT l.symbol, l.mic, l.country, l.quote_currency, l.isin, "
             "       c.name, c.id, c.cik, c.reporting_currency, c.taxonomy, "
             "       l.instrument_id IS NOT NULL AS has_prices, "
-            "       c.cik IS NOT NULL AS sec_identity, l.asset_type "
+            "       c.cik IS NOT NULL AS sec_identity, l.asset_type, "
+            "       c.sic, c.sic_description "
             "FROM listings l JOIN companies c ON c.id = l.company_id"
         ).fetchall()
     finally:
@@ -403,6 +444,8 @@ def load(database: str) -> InstrumentRegistry:
                 has_fundamentals=bool(r[11]),
                 asset_type=str(r[12]),
                 sec_identity=bool(r[11]),
+                sic=r[13],
+                sic_description=r[14],
             )
             for r in rows
         ]
