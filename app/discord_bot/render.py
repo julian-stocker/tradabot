@@ -37,7 +37,7 @@ from app.core.events import EventCategory, EventType, Severity
 from app.discord_bot.analysis import StockCheck
 from app.discord_bot.resolve import Availability, Resolution
 from app.notifications.models import NotificationMessage
-from app.publishing import presentation
+from app.publishing import indicators, presentation
 
 FOOTER: Final = "Descriptive analysis only · No forecast or investment recommendation."
 
@@ -49,8 +49,46 @@ to show: a reader does not need to know which share family a figure came from.""
 
 _MAX_BULLETS: Final = 4
 
+
+def _badge(internal: str | None) -> str:
+    """The emoji for a state an owning service already named, with a space.
+
+    Discord cannot colour a substring of embed text, so the category travels as
+    an emoji instead. The mapping is :mod:`app.publishing.indicators`, which
+    reads it from the same table that decides the embed's own colour -- one
+    vocabulary, so a state cannot be green on the left of the card and orange in
+    the middle of it.
+    """
+    return indicators.BADGES[presentation.semantic(internal)] + " "
+
+
+def _peer_percentiles(check: StockCheck) -> dict[str, float]:
+    """Peer position by metric key, or empty when no comparison was made.
+
+    Read from the comparison the peer service already produced. Nothing is
+    recomputed here: the renderer has no peer group, no statistics and no way to
+    form either.
+    """
+    peers = getattr(check, "peers", None)
+    if peers is None or not peers.available:
+        return {}
+    return {c.metric: c.percentile for c in peers.comparisons}
+
+
+def _own_percentiles(check: StockCheck) -> dict[str, float]:
+    """Own-history position by metric key, from the trajectory already built."""
+    trajectory = getattr(check, "trajectory", None)
+    if trajectory is None:
+        return {}
+    return {
+        name: metric.percentile
+        for name, metric in (getattr(trajectory, "metrics", {}) or {}).items()
+        if metric.percentile is not None
+    }
+
+
 _PARTIAL_SECTION: Final = (
-    "_Partial — the figures shown are as filed; other line items this section "
+    "🟡 _Partial — the figures shown are as filed; other line items this section "
     "needs were not reported._"
 )
 """Said when a section shows numbers and still cannot be assessed. Distinct
@@ -263,6 +301,23 @@ def _ifrs_note(section_name: str, section: Any, taxonomy: str | None) -> str | N
     return note
 
 
+def _section_states(section: Any) -> list[str]:
+    """The internal state codes a section carries, unrendered.
+
+    Separated from :func:`_state_lines` because a caller that needs to *test*
+    which states are present must not do it against display text. It once did:
+    the partial-data rule compared a rendered label to a constant, and adding a
+    badge to the label silently turned Coca-Cola's honest "Partial — the figures
+    shown are as filed" back into "Insufficient data", undoing a fix made two
+    phases earlier. Codes are what the services emit; labels are for reading.
+    """
+    return [
+        raw
+        for value in (getattr(section, "labels", {}) or {}).values()
+        if not (raw := str(value)).isdigit() and raw not in _INTERNAL_LABELS
+    ]
+
+
 def _state_lines(section: Any, *, overall: str) -> list[str]:
     """Named states for a section, plus its confidence only when it is worse.
 
@@ -272,15 +327,12 @@ def _state_lines(section: Any, *, overall: str) -> list[str]:
     whole has to say so where it is read.
     """
     lines: list[str] = []
-    for value in (getattr(section, "labels", {}) or {}).values():
-        raw = str(value)
-        if raw.isdigit() or raw in _INTERNAL_LABELS:
-            continue
+    for raw in _section_states(section):
         state = presentation.state(raw)
-        lines.append(state.label)
+        lines.append(f"{_badge(raw)}{state.label}")
     own = str(getattr(section, "confidence", "") or "")
     if own and own != overall and _CONFIDENCE_RANK.get(own, 9) < _CONFIDENCE_RANK.get(overall, 9):
-        lines.append(f"_Data here: {presentation.label(own).lower()}_")
+        lines.append(f"{_badge(own)}_Data here: {presentation.label(own).lower()}_")
     return lines
 
 
@@ -300,14 +352,61 @@ def _net_position(section: Any, currency: str | None = None) -> tuple[str, str] 
     return label, _money(abs(value), currency)
 
 
+_SECTION_INDICATOR_METRICS: Final[dict[str, tuple[str, ...]]] = {
+    "PROFITABILITY": ("operating_margin", "gross_margin"),
+    "CASH GENERATION": ("fcf_margin",),
+}
+"""Sections whose figures gain a one-line reading of where they stand.
+
+Only the margins. Growth prints revenue, earnings per share and operating
+income, which are scale quantities with no favourable level; Balance sheet and
+Capital structure already carry a state line the Advisor wrote. Adding a line
+to those would repeat what is already there, and adding one to Growth would
+invent a claim."""
+
+
+def _section_indicators(
+    section_name: str,
+    *,
+    own: dict[str, float],
+    peer: dict[str, float],
+) -> list[str]:
+    """Where this section's margins stand, in one line, when that is knowable.
+
+    Different information from the trajectory block further down the card: that
+    one says how a figure *moved*, this one says where it currently *sits*. The
+    line is omitted entirely when no context exists, which is most of the time
+    for most companies.
+    """
+    wanted = _SECTION_INDICATOR_METRICS.get(section_name)
+    if not wanted:
+        return []
+    parts = [
+        f"{found.badge} {_LABELS.get(name, name)} — {found.reason}"
+        for name in wanted
+        if (
+            found := indicators.margin_indicator(
+                name, own_percentile=own.get(name), peer_percentile=peer.get(name)
+            )
+        )
+        is not None
+        and found.status is not presentation.Semantic.NEUTRAL
+    ]
+    return ["\n".join(parts)] if parts else []
+
+
 def _quality_fields(
     report: Any,
     overall: str,
     currency: str | None = None,
     taxonomy: str | None = None,
+    own: dict[str, float] | None = None,
+    peer: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """One field per company-quality section, figures first, state after."""
     fields: dict[str, str] = {}
+    own = own or {}
+    peer = peer or {}
     for name, label, metrics in _QUALITY_SECTIONS:
         section = next((s for s in report.company_quality if s.name == name), None)
         if section is None:
@@ -320,7 +419,7 @@ def _quality_fields(
         if name == "BALANCE SHEET" and (net := _net_position(section, currency)) is not None:
             rows.append(net)
         states = _state_lines(section, overall=overall)
-        if rows and states == [presentation.state("INSUFFICIENT_DATA").label]:
+        if rows and _section_states(section) == ["INSUFFICIENT_DATA"]:
             # Figures are printed and the section still says "Insufficient
             # data", which reads as though the numbers above it are unreliable.
             # They are not -- they are the company's own filings, and what is
@@ -332,7 +431,12 @@ def _quality_fields(
         note = _sector_note(section) or _ifrs_note(name, section, taxonomy)
         if note is not None:
             # Replace the generic state, do not stack a second sentence on it.
-            states = [f"_{note}_"]
+            # The badge sits outside the italic markers: a refusal is grey, and
+            # `_⚪ text_` puts the emoji inside the emphasis where it renders as
+            # part of the sentence rather than as its marker.
+            states = [f"⚪ _{note}_"]
+        else:
+            states = _section_indicators(name, own=own, peer=peer) + states
         parts = [part for part in (_aligned(rows), *states) if part]
         if parts:
             fields[label] = "\n".join(parts)
@@ -352,14 +456,18 @@ def _valuation_field(report: Any) -> str:
         # is about price history and would be wrong here. Valuation has its own
         # reason for having none.
         parts = [_aligned(rows)] if rows else []
-        parts.append("Unavailable — not enough valuation history for a comparison.")
+        parts.append("⚪ Unavailable — not enough valuation history for a comparison.")
         return "\n".join(parts)
     context = presentation.state(raw)
     if context.label:
         rows.append(("vs own history", context.short.upper()))
-    parts = [_aligned(rows)] if rows else ["Unavailable."]
+    parts = [_aligned(rows)] if rows else ["⚪ Unavailable."]
     if context.explanation:
-        parts.append(f"_{context.explanation}_")
+        # The badge belongs to the valuation context the Advisor already
+        # decided. Very high and very low are both orange: unusual, worth a
+        # look, no direction. Expensive is not a verdict and cheap is not a
+        # recommendation, and the sentence beside it says so.
+        parts.append(f"{_badge(raw)}_{context.explanation}_")
     return "\n".join(parts)
 
 
@@ -375,7 +483,7 @@ def _peer_field(check: StockCheck) -> str | None:
     if peers is None:
         return None
     if not peers.available:
-        return f"Unavailable — {peers.detail or 'no comparable peer group'}."
+        return f"⚪ Unavailable — {peers.detail or 'no comparable peer group'}."
 
     # `_value` already owns how a multiple and a percentage render on this card,
     # and the peer metric keys are the Advisor's own, so the peer row and the
@@ -415,7 +523,11 @@ def _peer_field(check: StockCheck) -> str | None:
         )
     sentence = presentation_describe(peers)
     if sentence:
-        parts.append(sentence)
+        # Orange, never green. `MetricComparison.higher_is_not_better` is always
+        # true and exists so that a consumer wanting to sort by "good" has to
+        # confront that the data does not support it. A percentile is a
+        # position in an industry group, not a grade.
+        parts.append(f"🟠 {sentence}")
     return "\n".join(parts)
 
 
@@ -476,6 +588,7 @@ def _trajectory_field(check: StockCheck) -> str | None:
     report = getattr(check, "trajectory", None)
     if report is None:
         return None
+    peer = _peer_percentiles(check)
     entries: list[str] = []
     for metric, label in _TRAJECTORY_ORDER:
         if len(entries) >= _MAX_TRAJECTORIES:
@@ -483,7 +596,7 @@ def _trajectory_field(check: StockCheck) -> str | None:
         found = report.get(metric)
         if found is None or not found.available:
             continue
-        line = _trajectory_entry(found, label)
+        line = _trajectory_entry(found, label, peer=peer.get(metric))
         if line is None:
             continue
         if sum(len(e) + 1 for e in [*entries, line]) > _TRAJECTORY_BUDGET:
@@ -509,7 +622,27 @@ def _no_trajectory(report: Any) -> str | None:
     return "Unavailable — no comparable reported history."
 
 
-def _trajectory_entry(found: Any, label: str) -> str | None:
+def _trajectory_badge(found: Any, peer: float | None) -> str:
+    """The badge for one trajectory line, or nothing at all.
+
+    Three cases, and two of them are silent. A margin gets a category from where
+    it sits in its own recorded range, tempered by peers. A share count gets the
+    Advisor's own label -- the buyback and dilution semantics were decided in
+    Phase 12 and are not re-decided here, which also means the split detection
+    behind them is inherited rather than reimplemented. Revenue gets nothing:
+    its own-history percentile is degenerate, so there is no context in which a
+    revenue figure could be called favourable without inventing one.
+    """
+    metric = str(found.metric)
+    if metric in indicators.MARGIN_METRICS:
+        found_indicator = indicators.margin_indicator(
+            metric, own_percentile=found.percentile, peer_percentile=peer
+        )
+        return f"{found_indicator.badge} " if found_indicator is not None else ""
+    return ""
+
+
+def _trajectory_entry(found: Any, label: str, *, peer: float | None = None) -> str | None:
     """One metric: where it was, where it is, and where that sits in its past."""
     change = found.changes.get(_TRAJECTORY_WINDOW) or found.changes.get(_TRAJECTORY_FALLBACK)
     if change is None:
@@ -531,7 +664,8 @@ def _trajectory_entry(found: Any, label: str) -> str | None:
         if found.percentile is not None and found.metric in _PERCENTILE_METRICS
         else ""
     )
-    line = f"**{label}** {then} → {now} over {change.window} · {movement}{tail}"
+    badge = _trajectory_badge(found, peer)
+    line = f"{badge}**{label}** {then} → {now} over {change.window} · {movement}{tail}"
     note = _recent_note(found, change)
     return f"{line}\n{note}" if note else line
 
@@ -1015,16 +1149,19 @@ def _data_quality_field(check: StockCheck) -> str:
     rows.append(("As of", _pretty_date(check.as_of)))
     parts = [_aligned(rows)]
     if explain is not None:
-        parts.append(f"_{explain}_")
+        # Yellow, never red. Partial coverage is a limit on what Tradabot holds,
+        # not a finding about the company, and colouring a data gap unfavourable
+        # would report the analyst's own blind spot as the issuer's problem.
+        parts.append(f"🟡 _{explain}_")
     if check.fundamentals is Availability.UNAVAILABLE:
         # A fund has no fundamentals to be missing. Saying "an absence of data"
         # about an index tracker invites the reader to wait for a sync that
         # will never produce revenue for it.
         parts.append(
-            "_This is a fund, not an operating company: it has holdings and a "
+            "⚪ _This is a fund, not an operating company: it has holdings and a "
             "net asset value rather than revenue, margins and a balance sheet._"
             if _is_fund(check)
-            else "_Fundamentals unavailable — an absence of data, not a judgement "
+            else "⚪ _Fundamentals unavailable — an absence of data, not a judgement "
             "about the company._"
         )
     parts.extend(f"_{note}_" for note in check.notes)
@@ -1065,7 +1202,21 @@ def check_message(check: StockCheck) -> NotificationMessage:
     report = check.report
     if report is not None:
         overall = str((report.confidence or {}).get("company_analysis", "INSUFFICIENT"))
-        fields.update(_quality_fields(report, overall, _currency(check), _taxonomy(check)))
+        # Read once and passed down. Both dictionaries come from results the
+        # analyst already produced, so annotating the card costs no extra call
+        # to the history, peer or advisor layers.
+        own_position = _own_percentiles(check)
+        peer_position = _peer_percentiles(check)
+        fields.update(
+            _quality_fields(
+                report,
+                overall,
+                _currency(check),
+                _taxonomy(check),
+                own=own_position,
+                peer=peer_position,
+            )
+        )
         refusal = getattr(check, "valuation_refusal", None)
         if check.market_data is Availability.AVAILABLE and not refusal:
             fields["Valuation"] = _valuation_field(report)
