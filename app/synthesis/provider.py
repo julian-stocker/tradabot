@@ -54,11 +54,48 @@ class ProviderFailure(StrEnum):
     TIMEOUT = "TIMEOUT"
     RATE_LIMITED = "RATE_LIMITED"
     PROVIDER_OUTAGE = "PROVIDER_OUTAGE"
+    AUTHENTICATION = "AUTHENTICATION"
+    """No usable credential. Added in 18.1: an adapter that reported a missing
+    API key as an outage would send somebody to read a status page."""
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    """The account cannot pay. Distinct from ``BUDGET_EXCEEDED``, which is
+    Tradabot's own cap refusing before dispatch; this one comes back from the
+    provider after a request was sent."""
     INVALID_JSON = "INVALID_JSON"
     SCHEMA_VIOLATION = "SCHEMA_VIOLATION"
     TOKEN_OVERFLOW = "TOKEN_OVERFLOW"
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     REFUSED = "REFUSED"
+
+
+REJECTED_BEFORE_INFERENCE: Final[frozenset[ProviderFailure]] = frozenset(
+    {
+        ProviderFailure.AUTHENTICATION,
+        ProviderFailure.QUOTA_EXCEEDED,
+        ProviderFailure.RATE_LIMITED,
+        ProviderFailure.SCHEMA_VIOLATION,
+        ProviderFailure.BUDGET_EXCEEDED,
+    }
+)
+"""Failures where the provider generated nothing, so nothing was billed.
+
+The default elsewhere is to assume a request was charged whenever the provider
+reports no usage -- a timeout may or may not have produced tokens, and guessing
+in the cheap direction is how a cap leaks. These five are different because the
+outcome is *known* rather than uncertain: a bad credential, an exhausted
+balance, a throttled request and a malformed request are all rejected at the
+edge before any inference happens, and ``BUDGET_EXCEEDED`` never left the
+machine at all.
+
+Charging them anyway would not overspend, but it would misreport, and the
+misreport has teeth: an exhausted account returns ``QUOTA_EXCEEDED`` on every
+attempt, so charging the estimate each time would burn Tradabot's own monthly
+cap on calls that cost nothing -- and the operator would then be looking at two
+exhausted budgets with no way to tell which one was real.
+
+A failure listed here still counts against the per-run call cap. That cap
+bounds blast radius, not money.
+"""
 
 
 @dataclass(frozen=True, slots=True)

@@ -510,8 +510,34 @@ def test_no_brief_string_uses_forbidden_vocabulary() -> None:
 
 
 # -------------------------------------------------------------- boundaries
-def test_no_model_sdk_is_imported_anywhere() -> None:
-    """Phase 18.0 needs no provider SDK, no HTTP client and no API key."""
+CONTRACT_MODULES = (
+    "brief.py",
+    "contract.py",
+    "evidence.py",
+    "packet.py",
+    "provider.py",
+    "validator.py",
+)
+"""The Phase 18.0 layer: what evidence is, what may be said about it, how that
+is checked, and what is produced when nothing answers. Phase 18.1 added an
+adapter, a ledger and a cache beside these; none of it is allowed inside them."""
+
+
+def test_the_contract_layer_needs_no_sdk_no_client_and_no_key() -> None:
+    """Narrowed in 18.1, and narrowed to something still worth asserting.
+
+    This originally covered ``app/synthesis/*.py`` and said "no SDK anywhere",
+    which was true when there was no provider. Phase 18.1 adds exactly one
+    adapter that imports one SDK, so the blanket claim is now false -- and the
+    honest replacement is not to delete the test but to name the modules the
+    claim still holds for. The packet builder, the contract, the validator and
+    the deterministic brief reach no network and know no credential; that is
+    what makes them testable offline and what a provider cannot bypass.
+
+    The whole-package version of this check lives in
+    ``test_synthesis_pilot.py::test_exactly_one_module_may_import_a_model_sdk``,
+    where it asserts the set of importers is exactly one file.
+    """
     banned = (
         "openai",
         "anthropic",
@@ -522,7 +548,8 @@ def test_no_model_sdk_is_imported_anywhere() -> None:
         "urllib",
         "socket",
     )
-    for path in Path("app/synthesis").glob("*.py"):
+    for name in CONTRACT_MODULES:
+        path = Path("app/synthesis") / name
         source = path.read_text()
         for node in ast.walk(ast.parse(source)):
             names = (
@@ -656,8 +683,20 @@ def test_evidence_types_are_immutable() -> None:
         assert cls.__dataclass_params__.frozen, name
 
 
-def test_the_synthesis_package_writes_to_no_store() -> None:
-    for path in Path("app/synthesis").glob("*.py"):
+def test_the_contract_layer_writes_to_no_store() -> None:
+    """Also narrowed in 18.1, for the same reason and with the same care.
+
+    Phase 18.1 adds a ledger and a cache that must write -- accounting that is
+    not persisted is not accounting. What must remain true is that assembling
+    evidence and judging a synthesis change nothing: the packet builder reads
+    the fact store, the event store and the registry and writes to none of them,
+    and the validator's verdict is a return value rather than a row.
+
+    That the new stores touch only their own file, and never the trading
+    database or the research store, is asserted separately below.
+    """
+    for name in CONTRACT_MODULES:
+        path = Path("app/synthesis") / name
         body = path.read_text()
         for token in (
             "upsert",
@@ -669,6 +708,24 @@ def test_the_synthesis_package_writes_to_no_store() -> None:
             "set_accession_state",
         ):
             assert token not in body, f"{path} writes via {token}"
+
+
+def test_the_pilot_stores_cannot_touch_the_trading_or_research_databases() -> None:
+    """One file, under ``data/``, holding money and model output.
+
+    The trading database is four gigabytes under Alembic control and carries
+    order tables; the research store is the point-in-time event log. A ledger
+    row belongs in neither, and a table named ``synthesis_raw`` one join away
+    from something executable is not a layout anybody should have to reason
+    about twice.
+    """
+    from app.synthesis.ledger import DEFAULT_PATH
+
+    assert Path("data/synthesis_ledger.db") == DEFAULT_PATH
+    for name in ("ledger.py", "cache.py", "service.py", "budget.py"):
+        body = (Path("app/synthesis") / name).read_text()
+        for other in ("tradabot.db", "sec_facts.parquet", "research_events.db"):
+            assert other not in body, f"{name} references {other}"
 
 
 def test_source_priority_is_declared_and_ordered() -> None:

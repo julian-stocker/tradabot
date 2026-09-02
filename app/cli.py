@@ -2368,6 +2368,186 @@ def _build_analyst(settings: Settings, facts_path: Path) -> Any:
     )
 
 
+def _synthesis_pilot(settings: Settings, args: argparse.Namespace) -> int:
+    """Run the frozen Phase 18.1 cohort, or price it without calling anything.
+
+    Dry run is the default and that is not a courtesy. This command is the only
+    thing in Tradabot that can spend money, so the shape that costs nothing is
+    the shape you get by omission; spending requires ``--confirm-spend`` and a
+    call count you typed. There is no flag meaning "all of them" and no path
+    from here to a universe -- the cohort is a literal in
+    :mod:`app.synthesis.pilot`, passed through unchanged.
+    """
+    from app.synthesis import PILOT_COHORT, OpenAIConfig, SynthesisLedger  # noqa: PLC0415
+    from app.synthesis import pricing_for as _pricing_for  # noqa: PLC0415
+
+    slots = [s for s in PILOT_COHORT if args.symbol is None or s.symbol == args.symbol.upper()]
+    if not slots:
+        print(f"no cohort slot for {args.symbol}; the cohort is frozen and symbol-specific")
+        return 2
+
+    packet_for = _pilot_packet_source(settings, args.facts)
+    config = OpenAIConfig()
+    pricing = _pricing_for(config.model)
+    ledger = SynthesisLedger()
+
+    if not args.confirm_spend:
+        return _pilot_dry_run(slots, packet_for, config, pricing, ledger)
+    return _pilot_execute(slots, packet_for, config, pricing, ledger, args)
+
+
+def _pilot_packet_source(settings: Settings, facts: str) -> Callable[[str, str], Any]:
+    """A ``(symbol, as_of) -> packet`` callback over the owning services.
+
+    Built here rather than inside the pilot module, which holds no store and
+    cannot enumerate companies. It resolves the symbols it is given and nothing
+    else -- there is no listing operation on the closure it returns.
+    """
+    from app.advisor import AdvisorService, FactStore  # noqa: PLC0415
+    from app.history import CompanyHistoryService  # noqa: PLC0415
+    from app.instruments.registry import load as load_registry  # noqa: PLC0415
+    from app.peers import PeerComparisonService, PeerUniverse  # noqa: PLC0415
+    from app.research_intelligence.developments import (  # noqa: PLC0415
+        CurrentDevelopmentsService,
+    )
+    from app.research_intelligence.store import EventStore  # noqa: PLC0415
+    from app.synthesis import EvidencePacketBuilder  # noqa: PLC0415
+
+    store = FactStore.from_parquet(facts)
+    registry = load_registry(_database_file(settings))
+    advisor = AdvisorService(
+        store,
+        _advisor_prices(settings, None),
+        sectors=_advisor_sectors(),
+        company_sectors=_company_sectors(),
+    )
+    builder = EvidencePacketBuilder(
+        registry_snapshot=registry,
+        history=CompanyHistoryService(facts=store),
+        advisor=advisor,
+        developments=CurrentDevelopmentsService(store=EventStore.open_existing(), facts=store),
+        peers=PeerComparisonService(
+            universe=PeerUniverse(registry.all_candidates()), advisor=advisor, facts=store
+        ),
+    )
+    by_symbol: dict[str, Any] = {}
+    for candidate in registry.all_candidates():
+        by_symbol.setdefault(candidate.symbol, candidate)
+        by_symbol[candidate.qualified] = candidate
+
+    def packet_for(symbol: str, as_of: str) -> Any:
+        candidate = by_symbol.get(symbol) or by_symbol.get(symbol.split(".", maxsplit=1)[0])
+        return None if candidate is None else builder.build(candidate, as_of=as_of)
+
+    return packet_for
+
+
+def _pilot_dry_run(
+    slots: list[Any],
+    packet_for: Callable[[str, str], Any],
+    config: Any,
+    pricing: Any,
+    ledger: Any,
+) -> int:
+    """Price every slot without sending anything."""
+    from decimal import Decimal  # noqa: PLC0415
+
+    from app.synthesis import current_month  # noqa: PLC0415
+    from app.synthesis.provider import build_request  # noqa: PLC0415
+
+    print(f"DRY RUN -- no provider call, no cost.  model {config.model}")
+    print(f"{'slot':18} {'items':>5} {'bytes':>6} {'~in tok':>7} {'worst $':>9}  outcome")
+    total = Decimal(0)
+    would_call = 0
+    for slot in slots:
+        label = f"{slot.symbol} {slot.as_of}"
+        packet = packet_for(slot.symbol, slot.as_of)
+        if packet is None:
+            print(f"{label:18} {'-':>5} {'-':>6} {'-':>7} {'-':>9}  NO PACKET")
+            continue
+        if not packet.items:
+            print(
+                f"{label:18} {0:5} {packet.size_bytes:6} {'-':>7} {'$0.00000':>9}  NOT_APPLICABLE"
+            )
+            continue
+        request = build_request(packet, max_output_tokens=config.max_output_tokens)
+        worst = pricing.cost_usd(
+            input_tokens=request.approximate_input_tokens,
+            output_tokens=config.max_output_tokens,
+        )
+        total += worst
+        would_call += 1
+        cost = f"${worst:.5f}"
+        print(
+            f"{label:18} {len(packet.items):5} {packet.size_bytes:6} "
+            f"{request.approximate_input_tokens:7} {cost:>9}  would call"
+        )
+    spent = ledger.month_spend_usd(current_month())
+    print(
+        f"\n{would_call} of {len(slots)} slots would call.  worst case ${total:.5f}.  "
+        f"spent this month ${spent:.5f}"
+    )
+    print("re-run with --confirm-spend --max-calls N to send N of them")
+    return 0
+
+
+def _pilot_execute(
+    slots: list[Any],
+    packet_for: Callable[[str, str], Any],
+    config: Any,
+    pricing: Any,
+    ledger: Any,
+    args: argparse.Namespace,
+) -> int:
+    """Send at most ``--max-calls`` requests and report what came back."""
+    from app.synthesis import (  # noqa: PLC0415
+        CostGuard,
+        OpenAISynthesisProvider,
+        SynthesisCache,
+        SynthesisService,
+        as_text,
+        run_pilot,
+    )
+
+    service = SynthesisService(
+        provider=OpenAISynthesisProvider(config=config),
+        guard=CostGuard(ledger=ledger, pricing=pricing, per_run_calls=args.max_calls),
+        cache=SynthesisCache(ledger),
+        ledger=ledger,
+        pricing=pricing,
+        config=config,
+    )
+    run = run_pilot(slots, service=service, packets=packet_for, max_calls=args.max_calls)
+
+    print(f"cohort {run.cohort_version}  model {config.model}")
+    for result in run.results:
+        label = f"{result.slot.symbol} {result.slot.as_of}"
+        if result.outcome is None:
+            print(f"{label:18} SKIPPED  {result.skipped}")
+            continue
+        ms = result.outcome.provider_latency_ms
+        latency = "" if ms is None else f"  {ms}ms"
+        print(f"{label:18} {result.outcome.outcome}{latency}  {result.outcome.detail}")
+        if not args.show:
+            continue
+        if result.outcome.validated is not None:
+            print(as_text(result.outcome.validated.synthesis))
+        elif result.outcome.fallback is not None:
+            print("-- deterministic brief (fallback) --")
+            print(as_text(result.outcome.fallback))
+
+    print(
+        f"\nattempted {run.calls_attempted}  validated {run.validated}  "
+        f"rejected {run.rejected}  failed {run.provider_failures}  "
+        f"not applicable {run.not_applicable}  cached {run.cache_hits}"
+    )
+    print(
+        f"input tokens {run.input_tokens}  output tokens {run.output_tokens}  "
+        f"spend ${run.spend_usd:.5f}"
+    )
+    return 0
+
+
 def _screen(settings: Settings, args: argparse.Namespace) -> int:
     """Find covered companies matching stated conditions. Never trades.
 
@@ -2932,6 +3112,7 @@ _COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "heartbeat": _heartbeat,
     "ingest-research": _ingest_research,
     "screen": _screen,
+    "synthesis-pilot": _synthesis_pilot,
     "discord-bot": _discord_bot,
     "seed": lambda settings, args: asyncio.run(
         _seed(settings, _parse_symbols(args.symbols) or None, args.days)
@@ -3118,6 +3299,28 @@ def _add_screen_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore
     screen.add_argument("--facts", default="data/sec_facts.parquet", help="Fact store path")
 
 
+def _add_synthesis_pilot_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    """The bounded synthesis pilot. Dry run unless told otherwise."""
+    pilot = sub.add_parser(
+        "synthesis-pilot",
+        help="Run the frozen Phase 18.1 synthesis cohort (dry run unless --confirm-spend)",
+    )
+    pilot.add_argument(
+        "--confirm-spend",
+        action="store_true",
+        help="Actually call the provider. Without this nothing is sent and nothing is billed.",
+    )
+    pilot.add_argument(
+        "--max-calls",
+        type=int,
+        default=1,
+        help="Provider calls this invocation may make (1..24). Default 1.",
+    )
+    pilot.add_argument("--symbol", default=None, help="Restrict to one cohort symbol")
+    pilot.add_argument("--show", action="store_true", help="Print each synthesis or fallback")
+    pilot.add_argument("--facts", default="data/sec_facts.parquet", help="Fact store path")
+
+
 def _add_research_ingestion_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Recurring SEC research ingestion."""
     ingest = sub.add_parser(
@@ -3151,6 +3354,7 @@ def _add_research_ingestion_parser(sub: argparse._SubParsersAction) -> None:  # 
 
 def _add_ops_parsers(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Portfolio and operations commands."""
+    _add_synthesis_pilot_parser(sub)
     _add_research_ingestion_parser(sub)
     _add_screen_parser(sub)
     advisor = sub.add_parser(

@@ -143,7 +143,11 @@ ignore_missing_imports = true
 # than silencing missing imports globally, so a genuinely missing dependency
 # still fails the type check.
 [[tool.mypy.overrides]]
-module = ["exchange_calendars.*", "pandas.*", "alpaca.*"]
+# `openai` is imported lazily inside `app/synthesis/openai_provider.py` and is
+# deliberately not a project dependency: the synthesis package must stay
+# importable, testable and type-checkable on a machine with no model SDK
+# installed. Installing it is an operator step at the API activation gate.
+module = ["exchange_calendars.*", "pandas.*", "alpaca.*", "openai.*"]
 ignore_missing_imports = true
 
 # --------------------------------------------------------------------------
